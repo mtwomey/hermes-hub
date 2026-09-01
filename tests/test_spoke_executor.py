@@ -120,3 +120,160 @@ def test_same_context_id_reuses_session_id_across_calls(tmp_path):
 
     assert seen_session_ids[0] == seen_session_ids[1]  # same contextId -> same session
     assert seen_session_ids[2] != seen_session_ids[0]  # different contextId -> different session
+
+
+def test_spoke_rejects_task_with_wrong_credential(tmp_path):
+    sent = []
+
+    async def send(frame):
+        sent.append(frame)
+
+    def agent_that_must_not_run(*, text, session_id, task_id, context_id, spoke_name):
+        raise AssertionError("agent must never be invoked for a wrong credential")
+
+    executor = SpokeExecutor(
+        spoke_name="Olive",
+        send=send,
+        session_map=_fresh_session_map(tmp_path),
+        agent_runner=agent_that_must_not_run,
+        expected_credential="correct-horse",
+    )
+
+    asyncio.run(
+        executor.handle_task_frame(
+            {
+                "task_id": "t1",
+                "context_id": "c1",
+                "text": "hi",
+                "credential": "wrong-value",
+            }
+        )
+    )
+
+    assert len(sent) == 1
+    assert sent[0]["type"] == "task_failed"
+    assert sent[0]["task_id"] == "t1"
+    # Do not echo the presented credential back in the error (Task 1.4).
+    assert "wrong-value" not in sent[0]["error"]
+
+
+def test_spoke_rejects_task_with_missing_credential(tmp_path):
+    sent = []
+
+    async def send(frame):
+        sent.append(frame)
+
+    def agent_that_must_not_run(*, text, session_id, task_id, context_id, spoke_name):
+        raise AssertionError("agent must never be invoked for a missing credential")
+
+    executor = SpokeExecutor(
+        spoke_name="Olive",
+        send=send,
+        session_map=_fresh_session_map(tmp_path),
+        agent_runner=agent_that_must_not_run,
+        expected_credential="correct-horse",
+    )
+
+    asyncio.run(
+        executor.handle_task_frame({"task_id": "t1", "context_id": "c1", "text": "hi"})
+    )
+
+    assert sent[-1]["type"] == "task_failed"
+
+
+def test_spoke_accepts_task_with_correct_credential(tmp_path):
+    sent = []
+    invoked = []
+
+    async def send(frame):
+        sent.append(frame)
+
+    def agent_runner(*, text, session_id, task_id, context_id, spoke_name):
+        invoked.append(text)
+        return f"echo:{text}"
+
+    executor = SpokeExecutor(
+        spoke_name="Olive",
+        send=send,
+        session_map=_fresh_session_map(tmp_path),
+        agent_runner=agent_runner,
+        expected_credential="correct-horse",
+    )
+
+    asyncio.run(
+        executor.handle_task_frame(
+            {
+                "task_id": "t1",
+                "context_id": "c1",
+                "text": "hi",
+                "credential": "correct-horse",
+            }
+        )
+    )
+
+    assert invoked == ["hi"]
+    assert sent[-1] == {"type": "task_complete", "task_id": "t1", "text": "echo:hi"}
+
+
+def test_spoke_dev_mode_allows_when_no_secret_configured(tmp_path):
+    """Mirrors hermes-peer D5 / hub._check_token: unset expected credential
+    means dev mode -- allow regardless of what's presented."""
+    sent = []
+    invoked = []
+
+    async def send(frame):
+        sent.append(frame)
+
+    def agent_runner(*, text, session_id, task_id, context_id, spoke_name):
+        invoked.append(text)
+        return "ok"
+
+    executor = SpokeExecutor(
+        spoke_name="Olive",
+        send=send,
+        session_map=_fresh_session_map(tmp_path),
+        agent_runner=agent_runner,
+        expected_credential="",
+    )
+
+    asyncio.run(
+        executor.handle_task_frame({"task_id": "t1", "context_id": "c1", "text": "hi"})
+    )
+
+    assert invoked == ["hi"]
+    assert sent[-1]["type"] == "task_complete"
+
+
+def test_spoke_credential_never_logged(tmp_path, caplog):
+    """Canary: a wrong-credential rejection must not write the credential
+    value into any log record."""
+    import logging
+
+    async def send(frame):
+        pass
+
+    def agent_that_must_not_run(*, text, session_id, task_id, context_id, spoke_name):
+        raise AssertionError("agent must never be invoked")
+
+    executor = SpokeExecutor(
+        spoke_name="Olive",
+        send=send,
+        session_map=_fresh_session_map(tmp_path),
+        agent_runner=agent_that_must_not_run,
+        expected_credential="correct-horse",
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        asyncio.run(
+            executor.handle_task_frame(
+                {
+                    "task_id": "t1",
+                    "context_id": "c1",
+                    "text": "hi",
+                    "credential": "SUPERSECRET-CANARY",
+                }
+            )
+        )
+
+    assert "SUPERSECRET-CANARY" not in caplog.text
+    assert "correct-horse" not in caplog.text

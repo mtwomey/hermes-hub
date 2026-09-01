@@ -73,6 +73,7 @@ class Router:
         context_id: str,
         text: str,
         metadata: Optional[Dict[str, Any]] = None,
+        credential: str = "",
         timeout_seconds: float = 120.0,
     ) -> AsyncIterator[Dict[str, Any]]:
         """Send a task to ``spoke_name`` and yield every frame it emits, in
@@ -80,6 +81,12 @@ class Router:
 
         Raises :class:`SpokeUnavailableError` immediately (H10, no queueing)
         if the spoke is not currently connected.
+
+        ``credential`` (V5): relayed opaquely and verbatim into the outbound
+        task frame. The router never validates it, never compares it, and
+        never stores it beyond the single ``send`` call below -- it must not
+        appear in any router attribute, queue entry, or cache once this
+        method returns (V5/V5a: the hub relays, only the spoke checks).
         """
         connection = self._connections.get(spoke_name)
         if connection is None:
@@ -89,7 +96,13 @@ class Router:
         self._task_queues[task_id] = queue
         try:
             await connection.send(
-                build_task_frame(task_id=task_id, context_id=context_id, text=text, metadata=metadata)
+                build_task_frame(
+                    task_id=task_id,
+                    context_id=context_id,
+                    text=text,
+                    metadata=metadata,
+                    credential=credential,
+                )
             )
             deadline = asyncio.get_event_loop().time() + timeout_seconds
             while True:

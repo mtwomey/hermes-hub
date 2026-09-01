@@ -49,19 +49,34 @@ def build_hub_parser() -> argparse.ArgumentParser:
     ask.add_argument("--hub-url", default="http://127.0.0.1:8770")
     ask.add_argument("--context-id", default="", help="Reuse a prior contextId for continuity")
     ask.add_argument("--token", default="", help="Bearer token for the hub's external API")
+    ask.add_argument(
+        "--credential",
+        default="",
+        help="Opaque per-spoke credential (V5a) the target spoke will check",
+    )
 
     return parser
 
 
 def build_streaming_message_body(
-    *, spoke: str, text: str, context_id: str = ""
+    *, spoke: str, text: str, context_id: str = "", credential: str = ""
 ) -> Dict[str, Any]:
-    """The JSON-RPC ``SendStreamingMessage`` body for ``hermes-hub ask``."""
+    """The JSON-RPC ``SendStreamingMessage`` body for ``hermes-hub ask``.
+
+    ``credential`` (V5/V5a): the caller's opaque per-spoke secret, carried in
+    message metadata under ``spokeCredential`` -- the same key
+    ``hub_executor`` extracts it from. Omitted entirely when empty so a
+    caller with no credential configured produces exactly the same request
+    shape as before this feature existed.
+    """
+    metadata: Dict[str, Any] = {"targetSpoke": spoke}
+    if credential:
+        metadata["spokeCredential"] = credential
     message: Dict[str, Any] = {
         "role": "ROLE_USER",
         "parts": [{"text": text}],
         "messageId": f"cli-{abs(hash(text)) & 0xFFFFFFFF:x}",
-        "metadata": {"targetSpoke": spoke},
+        "metadata": metadata,
     }
     if context_id:
         message["contextId"] = context_id
@@ -93,7 +108,9 @@ def extract_final_text(payload: Dict[str, Any]) -> Optional[str]:
 
 
 async def _ask(args: argparse.Namespace) -> int:
-    body = build_streaming_message_body(spoke=args.spoke, text=args.text, context_id=args.context_id)
+    body = build_streaming_message_body(
+        spoke=args.spoke, text=args.text, context_id=args.context_id, credential=args.credential
+    )
     headers = {"Content-Type": "application/json", "A2A-Version": "1.0"}
     if args.token:
         headers["Authorization"] = f"Bearer {args.token}"
@@ -189,6 +206,7 @@ def spoke_hub_ws_url(hub_base: str) -> str:
 
 
 async def _connect(args: argparse.Namespace) -> int:
+    from .credentials import resolve_spoke_credential
     from .sessions import SessionMap
     from .spoke_client import SpokeClient
     from .spoke_executor import SpokeExecutor
@@ -198,7 +216,13 @@ async def _connect(args: argparse.Namespace) -> int:
     async def send(frame: Dict[str, Any]) -> None:
         await client_holder["client"].send(frame)
 
-    executor = SpokeExecutor(spoke_name=args.name, send=send, session_map=SessionMap())
+    expected_credential = resolve_spoke_credential(args.name)
+    executor = SpokeExecutor(
+        spoke_name=args.name,
+        send=send,
+        session_map=SessionMap(),
+        expected_credential=expected_credential,
+    )
 
     async def on_frame(frame: Dict[str, Any]) -> None:
         if frame.get("type") == "task":

@@ -96,6 +96,16 @@ def test_build_streaming_message_body_includes_context_id_when_given():
     assert body["params"]["message"]["contextId"] == "ctx-99"
 
 
+def test_build_streaming_message_body_includes_credential_when_given():
+    body = build_streaming_message_body(spoke="Olive", text="hi", credential="opaque-secret")
+    assert body["params"]["message"]["metadata"]["spokeCredential"] == "opaque-secret"
+
+
+def test_build_streaming_message_body_omits_credential_key_when_absent():
+    body = build_streaming_message_body(spoke="Olive", text="hi")
+    assert "spokeCredential" not in body["params"]["message"]["metadata"]
+
+
 def test_parse_sse_event_line_ignores_non_data_lines():
     assert parse_sse_event_line("") is None
     assert parse_sse_event_line(": ping - now") is None

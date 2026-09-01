@@ -19,6 +19,7 @@ answers turn one correctly and gives a generic non-answer on turn two.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import threading
 import time
@@ -157,18 +158,42 @@ class SpokeExecutor:
         session_map: Optional[SessionMap] = None,
         agent_runner: AgentRunner = run_real_hermes_turn,
         heartbeat_interval_seconds: float = HEARTBEAT_INTERVAL_SECONDS,
+        expected_credential: str = "",
     ) -> None:
         self.spoke_name = spoke_name
         self.send = send
         self.session_map = session_map or SessionMap()
         self.agent_runner = agent_runner
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
+        #: (Task 1.4, V5a) This spoke's own locally-resolved secret. An
+        #: inbound task's credential is compared against this BEFORE any
+        #: agent work begins. Empty means dev mode (allow) -- mirrors
+        #: hermes-peer D5 / hub_server._check_token.
+        self.expected_credential = expected_credential
 
     async def handle_task_frame(self, frame: Dict[str, Any]) -> None:
         task_id = str(frame.get("task_id") or "")
         context_id = str(frame.get("context_id") or "")
         text = str(frame.get("text") or "")
+        presented_credential = str(frame.get("credential") or "")
+
+        if self.expected_credential and not hmac.compare_digest(
+            presented_credential, self.expected_credential
+        ):
+            # Rejection must be indistinguishable in shape from any other
+            # failure to an observer -- a generic task_failed frame. Never
+            # echo the presented credential back in the error (Task 1.4).
+            logger.info(
+                "task %s rejected: credential check failed before agent invocation",
+                task_id,
+            )
+            await self.send(
+                build_task_failed_frame(task_id=task_id, error="task rejected")
+            )
+            return
+
         session_id = self.session_map.session_for(context_id)
+        logger.info("task %s: credential accepted, invoking agent", task_id)
 
         run_future = asyncio.ensure_future(
             asyncio.to_thread(

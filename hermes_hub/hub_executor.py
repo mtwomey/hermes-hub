@@ -77,6 +77,11 @@ class HubExecutor(AgentExecutor):
 
         metadata = message_metadata(context)
         spoke_name = str(metadata.get("targetSpoke") or metadata.get("target_spoke") or "")
+        credential = str(metadata.get("spokeCredential") or "")
+        # Do not carry the credential twice: it travels in the frame's own
+        # `credential` field. Leaving it duplicated in `metadata` as well
+        # would widen the surface for accidental logging.
+        metadata = {k: v for k, v in metadata.items() if k != "spokeCredential"}
         text = message_text(context)
 
         if not spoke_name:
@@ -95,6 +100,7 @@ class HubExecutor(AgentExecutor):
                 context_id=context.context_id,
                 text=text,
                 metadata=metadata,
+                credential=credential,
                 timeout_seconds=self.timeout_seconds,
             ):
                 frame_type = frame.get("type")

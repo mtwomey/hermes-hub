@@ -69,9 +69,65 @@ def test_route_task_sends_task_frame_to_the_right_connection():
             "context_id": "c1",
             "text": "What is 9+16?",
             "metadata": {},
+            "credential": "",
         }
     ]
     assert frames == [{"type": "task_complete", "task_id": "t1", "text": "25"}]
+
+
+def test_router_relays_credential_verbatim():
+    router = Router()
+    conn = FakeConnection()
+    router.register_connection("Olive", conn)
+
+    async def go():
+        async def fake_spoke_worker():
+            await asyncio.sleep(0.01)
+            await router.dispatch_frame_from_spoke(
+                {"type": "task_complete", "task_id": "t1", "text": "ok"}
+            )
+
+        asyncio.ensure_future(fake_spoke_worker())
+        await _collect_task_frames(
+            router,
+            spoke_name="Olive",
+            task_id="t1",
+            context_id="c1",
+            text="hi",
+            credential="opaque-secret-value",
+        )
+
+    asyncio.run(go())
+    assert conn.sent[0]["credential"] == "opaque-secret-value"
+
+
+def test_router_does_not_store_credential():
+    router = Router()
+    conn = FakeConnection()
+    router.register_connection("Olive", conn)
+
+    async def go():
+        async def fake_spoke_worker():
+            await asyncio.sleep(0.01)
+            await router.dispatch_frame_from_spoke(
+                {"type": "task_complete", "task_id": "t1", "text": "ok"}
+            )
+
+        asyncio.ensure_future(fake_spoke_worker())
+        await _collect_task_frames(
+            router,
+            spoke_name="Olive",
+            task_id="t1",
+            context_id="c1",
+            text="hi",
+            credential="opaque-secret-value",
+        )
+
+    asyncio.run(go())
+    # After the task completes, the credential must not persist anywhere in
+    # router state: no attribute, no queue entry, no cache.
+    router_state = repr(vars(router))
+    assert "opaque-secret-value" not in router_state
 
 
 def test_route_task_yields_frames_incrementally_not_buffered():
@@ -154,3 +210,35 @@ def test_dispatch_frame_without_task_id_is_ignored_not_crash():
         await router.dispatch_frame_from_spoke({"type": "register", "name": "Olive"})
 
     asyncio.run(go())  # must not raise
+
+
+def test_credential_never_logged(caplog):
+    """Route a task with a canary credential and assert it never appears in
+    logs emitted anywhere on the routing path (Task 1.3, V5)."""
+    import logging
+
+    router = Router()
+    conn = FakeConnection()
+    router.register_connection("Olive", conn)
+
+    async def go():
+        async def fake_spoke_worker():
+            await asyncio.sleep(0.01)
+            await router.dispatch_frame_from_spoke(
+                {"type": "task_complete", "task_id": "t1", "text": "ok"}
+            )
+
+        asyncio.ensure_future(fake_spoke_worker())
+        await _collect_task_frames(
+            router,
+            spoke_name="Olive",
+            task_id="t1",
+            context_id="c1",
+            text="hi",
+            credential="SUPERSECRET-CANARY",
+        )
+
+    with caplog.at_level(logging.DEBUG):
+        asyncio.run(go())
+
+    assert "SUPERSECRET-CANARY" not in caplog.text

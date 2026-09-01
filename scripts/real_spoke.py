@@ -18,6 +18,7 @@ import sys
 sys.path.insert(0, "/Users/mtwomey/Git_Repos/hermes-hub")
 sys.path.insert(0, "/Users/mtwomey/.hermes/hermes-agent")
 
+from hermes_hub.credentials import resolve_spoke_credential
 from hermes_hub.sessions import SessionMap, SessionStore
 from hermes_hub.spoke_client import SpokeClient
 from hermes_hub.spoke_executor import SpokeExecutor
@@ -32,7 +33,18 @@ async def main(port: int, spoke_name: str) -> None:
         await client_holder["client"].send(frame)
 
     session_map = SessionMap(store=SessionStore())
-    executor = SpokeExecutor(spoke_name=spoke_name, send=send, session_map=session_map)
+    expected_credential = resolve_spoke_credential(spoke_name)
+    logging.info(
+        "%s: credential enforcement %s",
+        spoke_name,
+        "enabled" if expected_credential else "disabled (dev mode)",
+    )
+    executor = SpokeExecutor(
+        spoke_name=spoke_name,
+        send=send,
+        session_map=session_map,
+        expected_credential=expected_credential,
+    )
 
     async def on_frame(frame):
         if frame.get("type") == "task":
