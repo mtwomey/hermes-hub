@@ -67,6 +67,15 @@ def test_peer_list_reports_connected_spokes():
         assert sorted(p["name"] for p in out["peers"]) == ["Olive", "Pumpkin"]
 
 
+def test_peer_list_reports_hub_unreachable_distinct_from_empty_roster():
+    """M2: a refused connection must never be rendered as an empty but
+    otherwise healthy peer roster."""
+    out = json.loads(peer_tools.peer_list({"hub_url": "http://127.0.0.1:1"}))
+    assert out["success"] is False
+    assert "hub is unreachable" in out["error"].lower()
+    assert "peers" not in out
+
+
 def test_peer_list_reports_no_spokes_cleanly():
     with LiveHub() as hub:
         out = call(peer_tools.peer_list, hub)

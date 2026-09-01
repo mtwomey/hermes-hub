@@ -95,7 +95,7 @@ class HubClient:
                 self._raise_for_status(resp)
                 return resp.json()
         except httpx.HTTPError as exc:
-            raise HubClientError(f"cannot reach hub at {self.hub_url}: {exc}") from exc
+            raise HubClientError(f"hub is unreachable at {self.hub_url}: {exc}") from exc
 
     async def ask(
         self,
@@ -204,7 +204,7 @@ class HubClient:
         except HubClientError:
             raise
         except httpx.HTTPError as exc:
-            raise HubClientError(f"cannot reach hub at {self.hub_url}: {exc}") from exc
+            raise HubClientError(f"hub is unreachable at {self.hub_url}: {exc}") from exc
 
         if failure is not None:
             raise HubClientError(failure)
@@ -233,7 +233,7 @@ class HubClient:
                 self._raise_for_status(resp)
                 payload = resp.json()
         except httpx.HTTPError as exc:
-            raise HubClientError(f"cannot reach hub at {self.hub_url}: {exc}") from exc
+            raise HubClientError(f"hub is unreachable at {self.hub_url}: {exc}") from exc
         if "error" in payload:
             raise HubClientError(str(payload["error"]))
         return payload.get("result", {})
@@ -258,7 +258,7 @@ class HubClient:
                 self._raise_for_status(resp)
                 data = resp.content
         except httpx.HTTPError as exc:
-            raise HubClientError(f"cannot reach hub at {self.hub_url}: {exc}") from exc
+            raise HubClientError(f"hub is unreachable at {self.hub_url}: {exc}") from exc
 
         digest = hashlib.sha256(data).hexdigest()
         if expected_sha256 and digest != expected_sha256:

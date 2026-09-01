@@ -18,7 +18,8 @@ import sys
 sys.path.insert(0, "/Users/mtwomey/Git_Repos/hermes-hub")
 sys.path.insert(0, "/Users/mtwomey/.hermes/hermes-agent")
 
-from hermes_hub.credentials import resolve_spoke_credential
+from hermes_hub.config import resolve_spoke_name
+from hermes_hub.credentials import CredentialUnavailable, require_spoke_credential
 from hermes_hub.sessions import SessionMap, SessionStore
 from hermes_hub.spoke_client import SpokeClient
 from hermes_hub.spoke_executor import SpokeExecutor
@@ -33,12 +34,12 @@ async def main(port: int, spoke_name: str) -> None:
         await client_holder["client"].send(frame)
 
     session_map = SessionMap(store=SessionStore())
-    expected_credential = resolve_spoke_credential(spoke_name)
-    logging.info(
-        "%s: credential enforcement %s",
-        spoke_name,
-        "enabled" if expected_credential else "disabled (dev mode)",
-    )
+    try:
+        expected_credential = require_spoke_credential(spoke_name)
+    except CredentialUnavailable as exc:
+        logging.error("%s: managed-spoke startup refused: %s", spoke_name, exc)
+        raise SystemExit(2) from exc
+    logging.info("%s: Keychain credential enforcement enabled", spoke_name)
     executor = SpokeExecutor(
         spoke_name=spoke_name,
         send=send,
@@ -82,5 +83,5 @@ async def main(port: int, spoke_name: str) -> None:
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8770
-    spoke_name = sys.argv[2] if len(sys.argv) > 2 else "Pumpkin"
+    spoke_name = resolve_spoke_name(sys.argv[2] if len(sys.argv) > 2 else "")
     asyncio.run(main(port, spoke_name))

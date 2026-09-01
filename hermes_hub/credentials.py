@@ -26,6 +26,11 @@ KEYCHAIN_SERVICE = "hermes-hub"
 ENV_VAR_NAME = "HERMES_HUB_SPOKE_CREDENTIAL"
 
 
+class CredentialUnavailable(RuntimeError):
+    """The managed-service Keychain credential required by V5a is absent or
+    an unsafe environment override was supplied."""
+
+
 def _keychain_account(spoke_name: str) -> str:
     return f"spoke:{spoke_name}:credential"
 
@@ -56,6 +61,28 @@ def _read_keychain(spoke_name: str) -> str:
     if proc.returncode != 0:
         return ""
     return (proc.stdout or "").rstrip("\n")
+
+
+def require_spoke_credential(spoke_name: str) -> str:
+    """Resolve a V5a credential for a *managed* spoke, failing closed.
+
+    Unlike :func:`resolve_spoke_credential`, this deliberately rejects the
+    environment variable: launchd plist EnvironmentVariables are
+    world-readable. Managed services must obtain the value only from the
+    macOS Keychain account ``spoke:<name>:credential``. The returned value
+    stays in process memory and must never be logged or placed in argv.
+    """
+    if os.environ.get(ENV_VAR_NAME, ""):
+        raise CredentialUnavailable(
+            "managed spoke refuses a credential from environment; use the Keychain"
+        )
+    keychain_value = _read_keychain(spoke_name)
+    if not keychain_value:
+        raise CredentialUnavailable(
+            f"managed spoke requires Keychain credential {KEYCHAIN_SERVICE!r} / "
+            f"{_keychain_account(spoke_name)!r}"
+        )
+    return keychain_value
 
 
 def resolve_spoke_credential(spoke_name: str, *, explicit: str = "") -> str:
