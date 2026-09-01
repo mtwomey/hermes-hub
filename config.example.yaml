@@ -1,0 +1,55 @@
+# hermes-hub example configuration
+#
+# hermes-hub itself is configured entirely via CLI flags in v1 (see
+# `hermes-hub serve --help` / `hermes-hub-spoke connect --help`); there is
+# no config-file loader wired up yet. This file documents the settings a
+# deployment needs to track, for a human to translate into flags/env, and
+# as a forward-looking shape if config-file support is added later.
+
+hub:
+  # Host/port the hub's ASGI app binds (external A2A surface + spoke
+  # WebSocket endpoint share one port, per the plan's H12/M6 design).
+  host: 0.0.0.0
+  port: 8770
+
+  # Bearer token spokes must present at WebSocket connect time (H8).
+  # Store the real value in the OS keychain / a secret manager, not here.
+  # Empty string means "dev mode" (no auth enforced) -- do not use this in
+  # any deployment reachable beyond localhost.
+  spoke_token_ref: "hermes-hub-spoke-token"
+
+  # Bearer token external A2A callers must present (separate from the
+  # spoke token above).
+  external_token_ref: "hermes-hub-external-token"
+
+# One entry per spoke this hub expects to see connect. Purely documentation
+# in v1 -- the hub accepts any spoke whose token matches spoke_token_ref
+# and does not currently validate against a fixed allowlist (H10: no
+# queueing/allowlisting complexity for v1).
+spokes:
+  - name: Pumpkin
+    host: pumpkin.local        # the spoke's own machine, for operator reference only
+    skills:
+      - id: general-reasoning
+        name: General reasoning
+      - id: filesystem-search
+        name: Local filesystem search
+
+  - name: Olive
+    host: olive.local          # IT-managed, firewalled -- outbound only, per H1/H2
+    skills:
+      - id: general-reasoning
+        name: General reasoning
+
+# Example commands (see README.md and .hermes/evidence/gate6-implementation.md
+# for the full worked examples):
+#
+#   hermes-hub serve --host 0.0.0.0 --port 8770 --token <external_token>
+#
+#   hermes-hub-spoke connect --hub http://192.0.2.236:8770 \
+#     --name Pumpkin --token <spoke_token> \
+#     --skill general-reasoning:"General reasoning" \
+#     --skill filesystem-search:"Local filesystem search"
+#
+#   hermes-hub ask Pumpkin "What is 9+16?" --hub-url http://192.0.2.236:8770 \
+#     --token <external_token>

@@ -25,6 +25,7 @@ from a2a.server.tasks import InMemoryTaskStore
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route, WebSocketRoute
+from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from .agent_card import build_hub_agent_card
@@ -54,6 +55,38 @@ def _check_token(expected_token: str, presented_token: str) -> bool:
     return presented_token == expected_token
 
 
+class ExternalBearerAuthMiddleware:
+    """Enforce a shared bearer token on the hub's external HTTP routes only.
+
+    Mirrors hermes-peer's ``BearerAuthMiddleware`` (D5): an empty configured
+    token means "allow" (dev mode); a configured token rejects a missing or
+    wrong ``Authorization`` header with 401. Scoped to HTTP requests only —
+    the spoke WebSocket endpoint has its own independent token check
+    (``expected_spoke_token``, H8) and must not be double-gated here.
+    """
+
+    def __init__(self, app: ASGIApp, *, expected_token: str) -> None:
+        self.app = app
+        self.expected_token = expected_token
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not self.expected_token:
+            await self.app(scope, receive, send)
+            return
+        headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])
+        }
+        if headers.get("authorization", "") != f"Bearer {self.expected_token}":
+            response = JSONResponse(
+                {"error": "unauthorized", "message": "A valid bearer token is required."},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
 def build_hub_app(
     *,
     registry: Optional[SpokeRegistry] = None,
@@ -61,6 +94,7 @@ def build_hub_app(
     hub_name: str = "hermes-hub",
     base_url: str = "http://127.0.0.1:8770",
     expected_spoke_token: str = "",
+    expected_external_token: str = "",
     task_timeout_seconds: float = 120.0,
 ) -> Starlette:
     """Build the hub's ASGI app: A2A surface + spoke WebSocket endpoint."""
@@ -128,6 +162,7 @@ def build_hub_app(
     routes.append(Route("/health", endpoint=health, methods=["GET"]))
 
     app = Starlette(routes=routes)
+    app.add_middleware(ExternalBearerAuthMiddleware, expected_token=expected_external_token)
     app.state.registry = registry
     app.state.router = router
     app.state.agent_card = base_card

@@ -89,6 +89,54 @@ def test_spoke_websocket_accepts_correct_token():
         assert resp.json() == {"status": "ok", "connected_spokes": ["Olive"]}
 
 
+def test_external_a2a_route_rejects_missing_bearer_token_when_configured():
+    app = build_hub_app(expected_external_token="secret-external-token")
+    client = TestClient(app)
+    resp = client.get("/.well-known/agent-card.json")
+    assert resp.status_code == 401
+
+
+def test_external_a2a_route_rejects_wrong_bearer_token_when_configured():
+    app = build_hub_app(expected_external_token="secret-external-token")
+    client = TestClient(app)
+    resp = client.get(
+        "/.well-known/agent-card.json", headers={"Authorization": "Bearer wrong-token"}
+    )
+    assert resp.status_code == 401
+
+
+def test_external_a2a_route_accepts_correct_bearer_token_when_configured():
+    app = build_hub_app(expected_external_token="secret-external-token")
+    client = TestClient(app)
+    resp = client.get(
+        "/.well-known/agent-card.json",
+        headers={"Authorization": "Bearer secret-external-token"},
+    )
+    assert resp.status_code == 200
+
+
+def test_external_a2a_route_allows_any_request_when_no_token_configured():
+    """Dev mode: an empty expected_external_token means auth is not enforced,
+    matching hermes-peer's D5 behavior."""
+    app = build_hub_app()
+    client = TestClient(app)
+    resp = client.get("/.well-known/agent-card.json")
+    assert resp.status_code == 200
+
+
+def test_external_auth_does_not_gate_the_spoke_websocket_route():
+    """The spoke WebSocket endpoint has its own token check (expected_spoke_token);
+    the external HTTP bearer middleware must not additionally block it."""
+    app = build_hub_app(expected_external_token="secret-external-token")
+    client = TestClient(app)
+    with client.websocket_connect("/hub/v1/spoke") as ws:
+        ws.send_text(json.dumps({"type": "register", "name": "Olive", "token": "", "skills": []}))
+        resp = client.get(
+            "/health", headers={"Authorization": "Bearer secret-external-token"}
+        )
+        assert resp.json() == {"status": "ok", "connected_spokes": ["Olive"]}
+
+
 def test_spoke_websocket_first_frame_must_be_register():
     app = build_hub_app()
     client = TestClient(app)
