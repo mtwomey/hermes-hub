@@ -91,6 +91,12 @@ async def _run_reconnect_with_backoff():
     return client
 
 
+def test_client_logs_successful_registration(caplog):
+    with caplog.at_level("INFO", logger="hermes_hub.spoke_client"):
+        asyncio.run(_run_connect_and_register())
+    assert "spoke Olive: connected and registered" in caplog.text
+
+
 def test_client_reconnects_with_increasing_backoff_capped():
     client = asyncio.run(_run_reconnect_with_backoff())
     assert client.connect_attempts == 3

@@ -20,4 +20,5 @@ if [ ! -x "$HUB_PYTHON" ]; then
 fi
 
 cd "$HERMES_HUB_REPO"
+echo "ai.hermes.hub startup: host=$HERMES_HUB_HOST port=$HERMES_HUB_PORT venv=$HERMES_HUB_VENV"
 exec "$HUB_PYTHON" scripts/run_hub.py "$HERMES_HUB_PORT"

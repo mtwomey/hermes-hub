@@ -37,4 +37,5 @@ if ! "$SPOKE_PYTHON" -c "import a2a, websockets, uvicorn" >/dev/null 2>&1; then
 fi
 
 cd "$HERMES_HUB_REPO"
+echo "ai.hermes.spoke startup: name=$HERMES_HUB_SPOKE_NAME hub_port=$HERMES_HUB_PORT hermes_venv=$HERMES_AGENT_VENV"
 exec "$SPOKE_PYTHON" scripts/real_spoke.py "$HERMES_HUB_PORT" "$HERMES_HUB_SPOKE_NAME"

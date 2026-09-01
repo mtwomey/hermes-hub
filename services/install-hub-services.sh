@@ -109,11 +109,20 @@ install_services() {
     USER_ID=$(id -u)
 
     launchctl enable "gui/$USER_ID/$HUB_LABEL" 2>/dev/null || true
-    launchctl bootstrap "gui/$USER_ID" "$HUB_PLIST" 2>/dev/null || true
+    if ! launchctl bootstrap "gui/$USER_ID" "$HUB_PLIST"; then
+        log_error "launchctl failed to load $HUB_LABEL"
+        exit 1
+    fi
     log_info "$HUB_LABEL loaded"
 
     launchctl enable "gui/$USER_ID/$SPOKE_LABEL" 2>/dev/null || true
-    launchctl bootstrap "gui/$USER_ID" "$SPOKE_PLIST" 2>/dev/null || true
+    if ! launchctl bootstrap "gui/$USER_ID" "$SPOKE_PLIST"; then
+        log_error "launchctl failed to load $SPOKE_LABEL"
+        # Do not leave a partial managed deployment when spoke bootstrap
+        # fails. This only targets the new hub label, never the gateway.
+        launchctl bootout "gui/$USER_ID/$HUB_LABEL" 2>/dev/null || true
+        exit 1
+    fi
     log_info "$SPOKE_LABEL loaded"
 }
 

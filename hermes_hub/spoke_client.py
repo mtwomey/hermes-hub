@@ -110,6 +110,7 @@ class SpokeClient:
         self.registration_frames_sent += 1
         self._websocket = websocket
         self._connected.set()
+        logger.info("spoke %s: connected and registered", self.name)
         return websocket
 
     async def _receive_loop(self, websocket) -> None:
