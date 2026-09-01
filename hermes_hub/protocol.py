@@ -34,14 +34,23 @@ def build_task_frame(
     context_id: str,
     text: str,
     metadata: Optional[Dict[str, Any]] = None,
+    credential: str = "",
 ) -> Dict[str, Any]:
-    """Hub -> spoke: a routed A2A request to execute locally."""
+    """Hub -> spoke: a routed A2A request to execute locally.
+
+    ``credential`` (V5/V5a): an opaque, caller-supplied per-spoke secret.
+    This layer must not parse, validate, or assume any structure on it --
+    it is relayed verbatim so V5b (signatures) can later become a drop-in
+    replacement for what the caller puts in and what the spoke checks,
+    with no change to this frame shape.
+    """
     return {
         "type": FRAME_TASK,
         "task_id": task_id,
         "context_id": context_id,
         "text": text,
         "metadata": dict(metadata or {}),
+        "credential": credential,
     }
 
 

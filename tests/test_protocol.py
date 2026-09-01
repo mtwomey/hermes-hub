@@ -18,7 +18,20 @@ def test_build_task_frame_shape():
         "context_id": "c1",
         "text": "What is 9+16?",
         "metadata": {"targetSpoke": "Olive"},
+        "credential": "",
     }
+
+
+def test_task_frame_carries_opaque_credential():
+    frame = build_task_frame(
+        task_id="t1", context_id="c1", text="hi", credential="opaque-blob"
+    )
+    assert frame["credential"] == "opaque-blob"
+
+
+def test_task_frame_credential_defaults_empty():
+    frame = build_task_frame(task_id="t1", context_id="c1", text="hi")
+    assert frame["credential"] == ""
 
 
 def test_build_task_status_frame_defaults_to_working():
