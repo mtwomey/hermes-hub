@@ -1,0 +1,24 @@
+[project]
+name = "hermes-hub"
+version = "0.1.0"
+description = "WebSocket hub-and-spoke A2A peer protocol for Hermes instances"
+requires-python = ">=3.11"
+dependencies = [
+    "a2a-sdk[fastapi]==1.1.2",
+    "websockets>=13",
+    "httpx",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+hermes-hub = "hermes_hub.cli:hub_main"
+hermes-hub-spoke = "hermes_hub.cli:spoke_main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["hermes_hub*"]
