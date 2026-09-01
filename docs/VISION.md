@@ -137,7 +137,7 @@ Two working codebases, neither of which is the product yet.
 | Capability | hermes-peer (mesh) | hermes-hub (hub-spoke) | Target |
 |---|---|---|---|
 | In-session model tools | ✅ 6 tools (`peer_ask`, `peer_list`, `peer_info`, `peer_discover`, `peer_status`, `peer_fetch_artifact`) | ❌ **none** — CLI only | **Required (V1)** |
-| Artifacts / file transfer | ✅ inline + authenticated URL, SHA-256, verified to 100KB | ⚠️ **inline text only**; binary/large explicitly "not built in this version" | **Required (V9)** |
+| Artifacts / file transfer | ✅ inline + authenticated URL, SHA-256, verified to 100KB | ❌ **not wired at all** — `build_task_artifact_frame` exists and is unit-tested but is *never called*; the spoke emits only status/complete/failed, and the hub's `task_artifact` handler can never fire. No inbound file path either. | **Required (V9)** |
 | Loads into the live session | ✅ `.pth` + gateway shim | ❌ standalone by design | **Required (V1/V10)** |
 | Survives Olive's firewall | ❌ inbound blocked | ✅ solved, proven | **Required (V2)** |
 | Per-peer authorization | ✅ per-peer Keychain tokens | ❌ **single shared token, no per-spoke check** | **Required (V5)** |
@@ -160,8 +160,13 @@ surface and artifact handling + per-peer keys + local-Hermes-as-spoke.
    record (H8) called for per-spoke tokens; the implementation collapsed to a
    single shared `expected_spoke_token`. No gate caught it because no gate
    asked. Violates V5.
-2. **hermes-hub artifacts are inline-text-only.** Cannot carry a binary or a
-   large file — directly blocks V9, the chosen first real task.
+2. **hermes-hub artifact transport does not exist.** `build_task_artifact_frame`
+   is defined and unit-tested but never called by any production code path —
+   the spoke emits only `task_status`/`task_complete`/`task_failed`, so the
+   hub's `task_artifact` handler is unreachable. There is also no inbound
+   (caller→spoke) file path. `protocol.py`'s docstring describing
+   "inline-text-only" support overstates what is actually wired. Directly
+   blocks V9, the chosen first real task.
 
 ---
 
