@@ -77,6 +77,7 @@ implemented wrong — see §4).
 | V11 | Client agnosticism | **The hub is not Hermes-specific.** Any A2A-compliant client is a first-class caller — Claude Desktop, `curl`, future tools. Hermes is the *primary* client, never a *required* one. | Corrects a design error caught 2026-09-01: an injection-based async story would have made "must be a Hermes agent" a structural requirement of the hub, contradicting V8's portability intent. |
 | V12 | Async delivery mechanism | **Durable mailbox + client-side polling**, using A2A's own `GetTask`. The hub stores task state and results; clients retrieve on their own schedule. **No push, no injection, no webhooks in the hub.** | The only client-agnostic option, and it is spec-native. Rejected: gateway message injection (Hermes-only, violates V11), webhooks (needs an inbound listener on the client — the exact thing V2 exists to avoid; also hermes-peer's D14). Hermes-specific conveniences (e.g. auto-surfacing a result via `inject_message`) may exist as an optional *client-side* layer, never in the hub. |
 | V13 | Non-Hermes access path | **An MCP server fronting the hub** is the intended integration for MCP-native clients like Claude Desktop. **Rule: the adapter is always deployed local to its client, holding only that machine's credentials — never as a shared remote service.** | Claude Desktop speaks MCP natively; asking it to speak raw A2A is friction with no benefit. The MCP server is a thin adapter over the hub's existing A2A surface — an additional front door, not a second protocol in the core. The locality rule matters: a *shared* adapter holding every client's per-spoke keys would become exactly the fleet-wide concentration point V5 exists to prevent. Local to its client, it is merely a credential holder — structurally the same as Hermes reading the Keychain. |
+| V14 | Code reuse from hermes-peer | **Port working code, don't reimplement.** `artifacts.py` (inline/URL threshold, SHA-256, verified to 100KB) and `peer_tool.py` (six working model tools) are copied into hermes-hub and adapted. | **Reverses hermes-hub's H7** ("fresh code, not an import"), which was a clean-repo instinct made before this vision doc existed. Reimplementing tested, working artifact handling is duplicated effort for no benefit. Note this is a *port* (copy + adapt into this repo), NOT a runtime import dependency — H7's actual goal, keeping hermes-hub's release lifecycle independent of hermes-peer, is preserved. |
 
 ---
 
@@ -187,6 +188,11 @@ test.
 Ordered by dependency, not priority. Each becomes its own gated tactical plan
 under `.hermes/plans/`; this document only sets scope and intent.
 
+**Sequencing decision (2026-09-01):** the first build plan covers **W1 and W2
+together**. Both are surgery on the same protocol layer — `protocol.py`,
+`router.py`, `spoke_executor.py` — so splitting them means touching the same
+files twice with two rounds of gates. W3 and W4 follow as separate plans.
+
 **W1 — Per-peer authorization (defect, V5/V5a).**
 Replace the single shared token with spoke-enforced per-peer credentials.
 Concretely: add an **opaque** credential field to the task frame (currently
@@ -200,16 +206,22 @@ Keychain-backed on macOS; portable equivalent for the future Linux/RPi hub.
 V5b (signatures) is a later change to the endpoints only, never to the hub or
 the wire format.
 
-**W2 — Real artifact transfer (defect, V9).**
+**W2 — Real artifact transfer (defect, V9, V14).**
 Binary-safe, size-tolerant file movement spoke→hub→caller and back, SHA-256
-verified. hermes-peer's `artifacts.py` is the working reference — inline under
-a threshold, authenticated URL above it.
+verified. **Port hermes-peer's `artifacts.py`** (inline under a threshold,
+authenticated URL above it, SHA-256 in metadata — verified to 100KB) rather
+than reimplementing. hermes-hub's current frame protocol is inline-text-only
+and explicitly states large-file/binary routing is "not built in this
+version" — that is the gap.
 
-**W3 — In-session tool surface (V1, V3, V10).**
-The heart of the vision. Peer tools registered into the live Hermes runtime;
-Pumpkin's own Hermes auto-connects as a spoke; hub runs as a managed service
-rather than a hand-started foreground process. Cache-safe discovery per V3 —
-static prompt line, rich tool descriptions, on-demand `peer_list`/`peer_info`.
+**W3 — In-session tool surface (V1, V3, V10, V14).**
+The heart of the vision. **Port hermes-peer's `peer_tool.py`** (six working
+tools: `peer_ask`, `peer_list`, `peer_info`, `peer_discover`, `peer_status`,
+`peer_fetch_artifact`) and adapt to the hub. Registered into the live Hermes
+runtime; Pumpkin's own Hermes auto-connects as a spoke; hub runs as a managed
+service rather than a hand-started foreground process. Cache-safe discovery
+per V3 — static prompt line, rich tool descriptions, on-demand
+`peer_list`/`peer_info`. hermes-hub currently has **no** tool surface at all.
 
 **W4 — First real task (V9).**
 Not a test: actually pull a real file from one machine and use it to change
