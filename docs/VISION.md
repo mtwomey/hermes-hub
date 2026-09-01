@@ -68,7 +68,7 @@ implemented wrong — see §4).
 | V4 | Remote permissions | **Full side effects allowed.** A peer may write files, run commands, and use side-effecting tools. | All machines are Matthew's. Mirrors hermes-peer D8. See V5 for the security consequence this creates and how it is bounded. |
 | V5 | Authorization model | **Per-peer keys, enforced at the SPOKE, not the hub.** Three distinct auth questions: (a) may this spoke join? — hub checks, (b) may this caller reach the hub? — hub checks, (c) may this caller command *this specific spoke*? — **the spoke checks, using its own local secret**. The hub relays the caller's credential opaquely: never validates it, never stores it. | Restores the mesh property that compromising one key reaches one machine. Hub-side enforcement would NOT achieve this — a hub holding verification material for every spoke is a single point of total compromise, exactly what this decision prevents. Keeping the hub out of the trust path is also what makes V8 (hub on a cheap always-on box) safe. **hermes-hub as built has a single shared token and NO per-spoke check anywhere — a defect to fix, not a design to keep.** |
 | V5a | Credential form (now) | **Shared per-spoke secret** carried in an opaque credential field on the task frame; spoke compares against its own Keychain entry before executing. | Option B of four considered. Buys the "hub is not a fleet-wide key" property at roughly the cost of the weaker hub-side alternative. **Accepted residual risk:** the hub sees credentials in flight and could replay them. Acceptable for two personal machines on a trusted LAN; this is precisely what V5b fixes. |
-| V5b | Credential form (planned) | **Request signing / keypair auth.** The spoke verifies a signature instead of comparing a secret; the hub can no longer forge or usefully replay. | Already on hermes-peer's original roadmap ("keypair auth / request signing"). **Design constraint on V5a: the credential field MUST be opaque bytes with no assumed structure, so moving to signatures changes only what the caller puts in and what the spoke checks — no change to the hub, the frames, or routing.** If V5a is built in a way that makes V5b expensive, V5a was built wrong. |
+| V5b | Credential form (planned) | **Request signing / keypair auth.** The spoke verifies a signature instead of comparing a secret; the hub can no longer forge or usefully replay. Also retires V5a's shared-secret distribution problem: no secret to copy between machines, rotation is local, and trust grows linearly (publish a public key) instead of pairwise. | Already on hermes-peer's original roadmap ("keypair auth / request signing"). **Design constraint on V5a: the credential field MUST be opaque bytes with no assumed structure**, so moving to signatures changes only what the caller puts in and what the spoke checks — no change to the hub, the frames, or routing. If V5a is built in a way that makes V5b expensive, V5a was built wrong. |
 | V6 | Execution mode | **Synchronous by default; asynchronous for long work.** | Sync matches normal tool-call ergonomics. Async requires task persistence and a way to surface results back into a session later — real work, previously deferred as hermes-peer M8 and never built. Design is open (see §6). |
 | V7 | Direction | **Bidirectional and symmetric.** Either machine can ask the other. | Consequence: with the hub on Pumpkin, Olive can reach nothing while Pumpkin sleeps. Accepted for now; the main argument for always-on hub hardware later. |
 | V8 | Hub placement | **Pumpkin now; portable to always-on hardware (Raspberry Pi / Linux box) later.** Hub code stays pure-Python with no macOS-only dependencies. | Keeps the move cheap when it happens. Hub must not grow a dependency on Hermes core internals. |
@@ -256,12 +256,17 @@ definition, credential storage without macOS Keychain.
 5. **What happens to a spoke's in-flight task when the hub restarts?** W5's
    mailbox covers *completed* results; an in-flight task at restart is a
    distinct case. Re-dispatch, fail cleanly, or resume?
-6. **Credential distribution and rotation.** V5a needs a per-spoke secret on
-   both the caller and the spoke. How is it generated, delivered to both ends,
-   and rotated? hermes-peer did this by hand — workable for two machines,
-   awkward beyond that. (Open question 6 previously asked how per-peer keys
-   work for a non-Hermes caller; that is now answered by V13's locality rule —
-   the adapter runs local to its client and holds only that machine's keys.)
+6. **Credential distribution — deliberately NOT solved for V5a; revisit at V5b.**
+   V5a needs the same secret in two Keychains (caller's and spoke's), placed by
+   hand. That is acceptable at two machines and is what hermes-peer already
+   does. **Do not build tooling to automate this** — V5b largely retires the
+   problem rather than automating it: with keypairs there is no shared secret,
+   each machine keeps its own private key, and rotation becomes local. What
+   survives into V5b is *enrollment* ("Olive, trust this public key, it's
+   Pumpkin") — the same shape as SSH `authorized_keys`: still a step, but
+   nothing secret is at stake, a leaked public key is a non-event, and it
+   grows linearly with the fleet instead of pairwise. Settle the enrollment
+   UX when V5b is implemented, not before.
 
 ---
 
