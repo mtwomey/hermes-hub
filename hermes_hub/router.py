@@ -189,6 +189,45 @@ class Router:
                     yield synthesized
                     continue
 
+                if frame_type == "task_artifact" and frame.get("data"):
+                    # A small artifact arrived inline rather than chunked.
+                    # Store it hub-side and attach a download URL, so
+                    # peer_fetch_artifact works identically for small and
+                    # large files. Without this, the inline path returns
+                    # sha256 metadata with no fetchable location and the
+                    # download route 404s (W3 M1 regression).
+                    import base64 as _base64
+
+                    artifact_id = str(frame.get("artifact_id") or "artifact")
+                    data = _base64.b64decode(frame["data"])
+                    declared_digest = str(frame.get("sha256") or "")
+                    digest = hashlib.sha256(data).hexdigest()
+                    if declared_digest and digest != declared_digest:
+                        yield build_task_failed_frame(
+                            task_id=task_id,
+                            error=(
+                                f"artifact {artifact_id} failed SHA-256 verification: "
+                                f"expected {declared_digest}, got {digest}"
+                            ),
+                        )
+                        return
+                    stored = artifacts.store_artifact_bytes(
+                        task_id=task_id,
+                        name=str(frame.get("name") or artifact_id),
+                        data=data,
+                        mime_type=str(frame.get("mime_type") or "application/octet-stream"),
+                        artifact_id=artifact_id,
+                    )
+                    enriched = dict(frame)
+                    enriched["sha256"] = stored.sha256
+                    enriched["size_bytes"] = stored.size_bytes
+                    enriched["url"] = (
+                        f"{self.base_url}{artifacts.ARTIFACT_DOWNLOAD_PATH}"
+                        f"/{task_id}/{artifact_id}"
+                    )
+                    yield enriched
+                    continue
+
                 yield frame
                 if is_terminal_frame(frame):
                     return

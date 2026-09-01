@@ -56,7 +56,24 @@ async def main(port: int, spoke_name: str) -> None:
         hub_url=f"ws://127.0.0.1:{port}/hub/v1/spoke",
         name=spoke_name,
         token="",
-        skills=[{"id": "general-reasoning", "name": "General reasoning"}],
+        skills=[
+            {
+                "id": "general-reasoning",
+                "name": "General reasoning",
+                # Task 1.3 / V3 open Q3: a bare id like
+                # "Pumpkin::general-reasoning" is an identifier the model
+                # cannot judge. Real prose plus an example is what makes
+                # "the model suggests a peer" possible.
+                "description": (
+                    "Runs a full Hermes agent turn on this machine, with "
+                    "local filesystem, shell, and network access."
+                ),
+                "examples": [
+                    "Read ~/Git_Repos/finance/normalize.clj and summarize it.",
+                    "Can you reach the internal wiki from there?",
+                ],
+            }
+        ],
         on_frame=on_frame,
     )
     client_holder["client"] = client
