@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "pyyaml"]
 
 [project.scripts]
 hermes-hub = "hermes_hub.cli:hub_main"

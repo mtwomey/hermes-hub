@@ -1,0 +1,28 @@
+manifest_version: 2
+name: hermes-hub-peer
+version: 0.1.0
+description: >
+  Reach other Hermes machines from inside a conversation. Registers the six
+  peer_* tools (peer_list, peer_info, peer_discover, peer_ask, peer_status,
+  peer_fetch_artifact) which route through a hermes-hub instance to Hermes
+  agents running on other machines over outbound-only WebSocket connections.
+author: Matthew Twomey
+kind: standalone
+provides_tools:
+  - peer_list
+  - peer_info
+  - peer_discover
+  - peer_ask
+  - peer_status
+  - peer_fetch_artifact
+provides_hooks: []
+requires_env: []
+optional_env:
+  - HERMES_HUB_URL
+  - HERMES_HUB_TOKEN
+python_dependencies:
+  - httpx
+tags:
+  - peer
+  - a2a
+  - hub
