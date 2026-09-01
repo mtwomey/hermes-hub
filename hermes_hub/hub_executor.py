@@ -51,6 +51,25 @@ def message_metadata(context: RequestContext) -> Dict[str, Any]:
             return {}
 
 
+def message_inbound_file(context: RequestContext) -> Dict[str, Any] | None:
+    """Task 2.5: extract a caller-supplied file from the inbound message's
+    parts, if present. Per the SDK's ``Part`` shape, a file part carries raw
+    bytes in ``.raw`` plus ``.filename``/``.media_type``; a plain text part
+    has none of these. Returns ``None`` when there is no file part."""
+    message = getattr(context, "message", None)
+    if message is None:
+        return None
+    for part in getattr(message, "parts", []) or []:
+        raw = getattr(part, "raw", b"")
+        if raw:
+            return {
+                "name": str(getattr(part, "filename", "") or "upload.bin"),
+                "mime_type": str(getattr(part, "media_type", "") or "application/octet-stream"),
+                "data": bytes(raw),
+            }
+    return None
+
+
 async def open_task(context: RequestContext, event_queue: EventQueue) -> TaskUpdater:
     """Enqueue the initial Task before any status update (SDK requirement)."""
     if context.current_task is None:
@@ -83,6 +102,7 @@ class HubExecutor(AgentExecutor):
         # would widen the surface for accidental logging.
         metadata = {k: v for k, v in metadata.items() if k != "spokeCredential"}
         text = message_text(context)
+        inbound_file = message_inbound_file(context)
 
         if not spoke_name:
             await updater.failed(
@@ -101,6 +121,7 @@ class HubExecutor(AgentExecutor):
                 text=text,
                 metadata=metadata,
                 credential=credential,
+                inbound_file=inbound_file,
                 timeout_seconds=self.timeout_seconds,
             ):
                 frame_type = frame.get("type")
@@ -111,10 +132,29 @@ class HubExecutor(AgentExecutor):
                     # immediately (Gate 3).
                     await updater.update_status(TaskState.TASK_STATE_WORKING)
                 elif frame_type == "task_artifact":
+                    parts = [Part(text=str(frame.get("text") or ""))]
+                    if frame.get("data"):
+                        import base64
+
+                        parts.append(
+                            Part(
+                                raw=base64.b64decode(frame["data"]),
+                                filename=str(frame.get("name") or "artifact"),
+                                media_type=str(frame.get("mime_type") or "application/octet-stream"),
+                            )
+                        )
+                    artifact_metadata: Dict[str, Any] = {}
+                    if frame.get("url"):
+                        artifact_metadata["url"] = frame["url"]
+                    if frame.get("sha256"):
+                        artifact_metadata["sha256"] = frame["sha256"]
+                    if frame.get("size_bytes") is not None:
+                        artifact_metadata["size_bytes"] = frame["size_bytes"]
                     await updater.add_artifact(
-                        [Part(text=frame.get("text", ""))],
+                        parts,
                         artifact_id=str(frame.get("artifact_id") or "artifact"),
                         name=str(frame.get("name") or "artifact"),
+                        metadata=artifact_metadata or None,
                     )
                 elif frame_type == "task_complete":
                     await updater.complete(

@@ -47,8 +47,10 @@ async def main(port: int, spoke_name: str) -> None:
     )
 
     async def on_frame(frame):
-        if frame.get("type") == "task":
-            await executor.handle_task_frame(frame)
+        # Task 2.5: route every frame through the general dispatcher so
+        # inbound artifact_begin/chunk/end sequences (ahead of the task
+        # frame) get reassembled before the task itself runs.
+        await executor.handle_frame(frame)
 
     client = SpokeClient(
         hub_url=f"ws://127.0.0.1:{port}/hub/v1/spoke",

@@ -203,6 +203,47 @@ def test_route_task_times_out_if_spoke_never_responds():
     asyncio.run(go())
 
 
+def test_route_task_sends_inbound_file_as_chunked_frames_before_task_frame():
+    """Task 2.5: an inbound file (caller -> spoke) is relayed as
+    artifact_begin/chunk*/end frames sent to the spoke BEFORE the task
+    frame, so the spoke can write it to disk before the agent runs."""
+    import hashlib
+
+    router = Router()
+    conn = FakeConnection()
+    router.register_connection("Olive", conn)
+
+    payload = b"inbound file contents"
+    digest = hashlib.sha256(payload).hexdigest()
+
+    async def go():
+        async def fake_spoke_worker():
+            await asyncio.sleep(0.01)
+            await router.dispatch_frame_from_spoke(
+                {"type": "task_complete", "task_id": "t1", "text": "used the file"}
+            )
+
+        asyncio.ensure_future(fake_spoke_worker())
+        return await _collect_task_frames(
+            router,
+            spoke_name="Olive",
+            task_id="t1",
+            context_id="c1",
+            text="use this file",
+            inbound_file={"name": "input.txt", "mime_type": "text/plain", "data": payload},
+        )
+
+    asyncio.run(go())
+
+    types_in_order = [f["type"] for f in conn.sent]
+    assert types_in_order[0] == "artifact_begin"
+    assert types_in_order[-2] == "artifact_end"
+    assert types_in_order[-1] == "task"  # the task frame goes out last
+    begin_frame = conn.sent[0]
+    assert begin_frame["sha256"] == digest
+    assert begin_frame["name"] == "input.txt"
+
+
 def test_dispatch_frame_without_task_id_is_ignored_not_crash():
     router = Router()
 
@@ -242,3 +283,121 @@ def test_credential_never_logged(caplog):
         asyncio.run(go())
 
     assert "SUPERSECRET-CANARY" not in caplog.text
+
+
+def test_router_reassembles_chunked_artifact_and_serves_url(tmp_path, monkeypatch):
+    """Task 2.4: the router buffers artifact_begin/chunk/end frames from the
+    spoke, verifies the declared SHA-256, stores via artifacts.py, and
+    yields a single synthesized task_artifact frame carrying a download URL
+    instead of forwarding the raw chunk frames to the caller."""
+    import hashlib
+
+    monkeypatch.setattr("hermes_hub.artifacts._artifact_root", lambda: tmp_path)
+
+    from hermes_hub.protocol import (
+        build_artifact_begin_frame,
+        build_artifact_chunk_frame,
+        build_artifact_end_frame,
+        chunk_artifact_bytes,
+    )
+
+    router = Router()
+    conn = FakeConnection()
+    router.register_connection("Olive", conn)
+
+    payload = bytes(range(256)) * 2000
+    digest = hashlib.sha256(payload).hexdigest()
+
+    async def go():
+        async def fake_spoke_worker():
+            await asyncio.sleep(0.01)
+            await router.dispatch_frame_from_spoke(
+                build_artifact_begin_frame(
+                    task_id="t1",
+                    artifact_id="a1",
+                    name="blob.bin",
+                    mime_type="application/octet-stream",
+                    total_bytes=len(payload),
+                    sha256=digest,
+                )
+            )
+            for seq, chunk in enumerate(chunk_artifact_bytes(payload)):
+                await router.dispatch_frame_from_spoke(
+                    build_artifact_chunk_frame(task_id="t1", artifact_id="a1", seq=seq, data=chunk)
+                )
+            await router.dispatch_frame_from_spoke(
+                build_artifact_end_frame(task_id="t1", artifact_id="a1")
+            )
+            await router.dispatch_frame_from_spoke(
+                {"type": "task_complete", "task_id": "t1", "text": "done"}
+            )
+
+        asyncio.ensure_future(fake_spoke_worker())
+        return await _collect_task_frames(
+            router,
+            spoke_name="Olive",
+            task_id="t1",
+            context_id="c1",
+            text="write a file",
+            timeout_seconds=5,
+        )
+
+    frames = asyncio.run(go())
+    artifact_frames = [f for f in frames if f["type"] == "task_artifact"]
+    assert len(artifact_frames) == 1
+    assert artifact_frames[0]["sha256"] == digest
+    assert "url" in artifact_frames[0]
+    assert artifact_frames[0]["url"].endswith("/t1/a1")
+    # The raw chunk frames must not leak through to the caller.
+    assert not [f for f in frames if f["type"] in ("artifact_begin", "artifact_chunk", "artifact_end")]
+    assert frames[-1]["type"] == "task_complete"
+
+
+def test_router_fails_task_on_sha256_mismatch(tmp_path, monkeypatch):
+    """Task 2.4: a deliberately corrupted chunk must fail the task with a
+    hash-mismatch error, not silently complete."""
+    monkeypatch.setattr("hermes_hub.artifacts._artifact_root", lambda: tmp_path)
+
+    from hermes_hub.protocol import (
+        build_artifact_begin_frame,
+        build_artifact_chunk_frame,
+        build_artifact_end_frame,
+    )
+
+    router = Router()
+    conn = FakeConnection()
+    router.register_connection("Olive", conn)
+
+    async def go():
+        async def fake_spoke_worker():
+            await asyncio.sleep(0.01)
+            await router.dispatch_frame_from_spoke(
+                build_artifact_begin_frame(
+                    task_id="t1",
+                    artifact_id="a1",
+                    name="blob.bin",
+                    mime_type="application/octet-stream",
+                    total_bytes=4,
+                    sha256="0" * 64,  # wrong on purpose
+                )
+            )
+            await router.dispatch_frame_from_spoke(
+                build_artifact_chunk_frame(task_id="t1", artifact_id="a1", seq=0, data=b"AAAA")
+            )
+            await router.dispatch_frame_from_spoke(
+                build_artifact_end_frame(task_id="t1", artifact_id="a1")
+            )
+
+        asyncio.ensure_future(fake_spoke_worker())
+        return await _collect_task_frames(
+            router,
+            spoke_name="Olive",
+            task_id="t1",
+            context_id="c1",
+            text="write a file",
+            timeout_seconds=5,
+        )
+
+    frames = asyncio.run(go())
+    assert frames[-1]["type"] == "task_failed"
+    assert "hash" in frames[-1]["error"].lower() or "sha-256" in frames[-1]["error"].lower()

@@ -54,12 +54,29 @@ def build_hub_parser() -> argparse.ArgumentParser:
         default="",
         help="Opaque per-spoke credential (V5a) the target spoke will check",
     )
+    ask.add_argument(
+        "--file",
+        default="",
+        help="Path to a local file to send to the spoke inline (Task 2.5, V9)",
+    )
+    ask.add_argument(
+        "--save-artifacts-to",
+        default="",
+        help="Directory to save any returned artifacts into, by name (Task 2.4)",
+    )
 
     return parser
 
 
 def build_streaming_message_body(
-    *, spoke: str, text: str, context_id: str = "", credential: str = ""
+    *,
+    spoke: str,
+    text: str,
+    context_id: str = "",
+    credential: str = "",
+    file_name: str = "",
+    file_bytes: Optional[bytes] = None,
+    file_mime_type: str = "application/octet-stream",
 ) -> Dict[str, Any]:
     """The JSON-RPC ``SendStreamingMessage`` body for ``hermes-hub ask``.
 
@@ -68,13 +85,27 @@ def build_streaming_message_body(
     ``hub_executor`` extracts it from. Omitted entirely when empty so a
     caller with no credential configured produces exactly the same request
     shape as before this feature existed.
+
+    ``file_bytes`` (Task 2.5, V9): an inbound file to send to the spoke,
+    inline base64 in a ``raw`` A2A Part alongside the text part.
     """
     metadata: Dict[str, Any] = {"targetSpoke": spoke}
     if credential:
         metadata["spokeCredential"] = credential
+    parts: List[Dict[str, Any]] = [{"text": text}]
+    if file_bytes is not None:
+        import base64
+
+        parts.append(
+            {
+                "raw": base64.b64encode(file_bytes).decode("ascii"),
+                "filename": file_name or "upload.bin",
+                "media_type": file_mime_type,
+            }
+        )
     message: Dict[str, Any] = {
         "role": "ROLE_USER",
-        "parts": [{"text": text}],
+        "parts": parts,
         "messageId": f"cli-{abs(hash(text)) & 0xFFFFFFFF:x}",
         "metadata": metadata,
     }
@@ -107,9 +138,55 @@ def extract_final_text(payload: Dict[str, Any]) -> Optional[str]:
     return "".join(p.get("text", "") for p in parts) or None
 
 
+def extract_artifact_info(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Pull artifact metadata (name, url, sha256, size_bytes, inline bytes)
+    out of an SSE event carrying an artifact-update result, if present
+    (Task 2.4/2.5)."""
+    result = payload.get("result", {})
+    artifact_update = result.get("artifactUpdate") or result.get("artifact_update")
+    if not artifact_update:
+        return None
+    artifact = artifact_update.get("artifact") or {}
+    metadata = artifact.get("metadata") or {}
+    inline_bytes = None
+    for part in artifact.get("parts", []):
+        if part.get("raw"):
+            import base64
+
+            inline_bytes = base64.b64decode(part["raw"])
+            break
+    return {
+        "name": artifact.get("name"),
+        "artifact_id": artifact.get("artifactId") or artifact.get("artifact_id"),
+        "url": metadata.get("url"),
+        "sha256": metadata.get("sha256"),
+        "size_bytes": metadata.get("size_bytes") or metadata.get("sizeBytes"),
+        "inline_bytes": inline_bytes,
+    }
+
+
 async def _ask(args: argparse.Namespace) -> int:
+    file_bytes = None
+    file_name = ""
+    if getattr(args, "file", ""):
+        import mimetypes
+        from pathlib import Path as _Path
+
+        p = _Path(args.file)
+        file_bytes = p.read_bytes()
+        file_name = p.name
+        file_mime_type = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+    else:
+        file_mime_type = "application/octet-stream"
+
     body = build_streaming_message_body(
-        spoke=args.spoke, text=args.text, context_id=args.context_id, credential=args.credential
+        spoke=args.spoke,
+        text=args.text,
+        context_id=args.context_id,
+        credential=args.credential,
+        file_name=file_name,
+        file_bytes=file_bytes,
+        file_mime_type=file_mime_type,
     )
     headers = {"Content-Type": "application/json", "A2A-Version": "1.0"}
     if args.token:
@@ -129,6 +206,31 @@ async def _ask(args: argparse.Namespace) -> int:
                 if "error" in payload:
                     print(f"error: {payload['error']}", file=sys.stderr)
                     return 1
+                artifact_info = extract_artifact_info(payload)
+                if artifact_info is not None:
+                    printable = {k: v for k, v in artifact_info.items() if k != "inline_bytes"}
+                    printable["has_inline_bytes"] = artifact_info.get("inline_bytes") is not None
+                    print(f"artifact: {json.dumps(printable)}", file=sys.stderr)
+                    save_dir = getattr(args, "save_artifacts_to", "")
+                    if save_dir and artifact_info.get("name"):
+                        from pathlib import Path as _Path
+
+                        dest_dir = _Path(save_dir)
+                        dest_dir.mkdir(parents=True, exist_ok=True)
+                        dest = dest_dir / artifact_info["name"]
+                        if artifact_info.get("inline_bytes") is not None:
+                            dest.write_bytes(artifact_info["inline_bytes"])
+                            print(f"saved inline artifact to {dest}", file=sys.stderr)
+                        elif artifact_info.get("url"):
+                            url = artifact_info["url"]
+                            if url.startswith("/"):
+                                url = args.hub_url.rstrip("/") + url
+                            dl_headers = dict(headers)
+                            async with httpx.AsyncClient(timeout=180.0) as dl_client:
+                                dl_resp = await dl_client.get(url, headers=dl_headers)
+                                dl_resp.raise_for_status()
+                                dest.write_bytes(dl_resp.content)
+                            print(f"downloaded artifact to {dest}", file=sys.stderr)
                 text = extract_final_text(payload)
                 if text is not None:
                     final_text = text
@@ -225,8 +327,7 @@ async def _connect(args: argparse.Namespace) -> int:
     )
 
     async def on_frame(frame: Dict[str, Any]) -> None:
-        if frame.get("type") == "task":
-            await executor.handle_task_frame(frame)
+        await executor.handle_frame(frame)
 
     client = SpokeClient(
         hub_url=spoke_hub_ws_url(args.hub),

@@ -121,7 +121,6 @@ def test_same_context_id_reuses_session_id_across_calls(tmp_path):
     assert seen_session_ids[0] == seen_session_ids[1]  # same contextId -> same session
     assert seen_session_ids[2] != seen_session_ids[0]  # different contextId -> different session
 
-
 def test_spoke_rejects_task_with_wrong_credential(tmp_path):
     sent = []
 
@@ -277,3 +276,177 @@ def test_spoke_credential_never_logged(tmp_path, caplog):
 
     assert "SUPERSECRET-CANARY" not in caplog.text
     assert "correct-horse" not in caplog.text
+
+
+def test_spoke_emits_produced_artifact_inline_when_small(tmp_path):
+    """Task 2.3: the spoke's own output directory is scanned after the
+    agent turn; a small produced file goes out inline (task_artifact)."""
+    sent = []
+
+    async def send(frame):
+        sent.append(frame)
+
+    def agent_that_writes_a_file(*, text, session_id, task_id, context_id, spoke_name, output_dir):
+        (output_dir / "result.txt").write_bytes(b"small output")
+        return "done"
+
+    executor = SpokeExecutor(
+        spoke_name="Olive",
+        send=send,
+        session_map=_fresh_session_map(tmp_path),
+        agent_runner=agent_that_writes_a_file,
+        artifact_root=tmp_path / "artifacts",
+    )
+
+    asyncio.run(
+        executor.handle_task_frame({"task_id": "t1", "context_id": "c1", "text": "write a file"})
+    )
+
+    artifact_frames = [f for f in sent if f["type"] == "task_artifact"]
+    assert len(artifact_frames) == 1
+    assert artifact_frames[0]["name"] == "result.txt"
+    import base64
+
+    assert base64.b64decode(artifact_frames[0]["data"]) == b"small output"
+    # task_complete must still be the final frame.
+    assert sent[-1]["type"] == "task_complete"
+
+
+def test_spoke_emits_produced_artifact_chunked_when_large(tmp_path):
+    """Task 2.3: a file over INLINE_MAX_BYTES goes out as
+    artifact_begin/artifact_chunk*/artifact_end instead of inline."""
+    sent = []
+
+    async def send(frame):
+        sent.append(frame)
+
+    big_payload = bytes(range(256)) * 2000  # ~512KB, well over the threshold
+
+    def agent_that_writes_a_big_file(*, text, session_id, task_id, context_id, spoke_name, output_dir):
+        (output_dir / "blob.bin").write_bytes(big_payload)
+        return "done"
+
+    executor = SpokeExecutor(
+        spoke_name="Olive",
+        send=send,
+        session_map=_fresh_session_map(tmp_path),
+        agent_runner=agent_that_writes_a_big_file,
+        artifact_root=tmp_path / "artifacts",
+    )
+
+    asyncio.run(
+        executor.handle_task_frame({"task_id": "t1", "context_id": "c1", "text": "write a big file"})
+    )
+
+    begin_frames = [f for f in sent if f["type"] == "artifact_begin"]
+    chunk_frames = [f for f in sent if f["type"] == "artifact_chunk"]
+    end_frames = [f for f in sent if f["type"] == "artifact_end"]
+    assert len(begin_frames) == 1
+    assert begin_frames[0]["total_bytes"] == len(big_payload)
+    import hashlib
+
+    assert begin_frames[0]["sha256"] == hashlib.sha256(big_payload).hexdigest()
+    assert len(chunk_frames) > 1  # must actually span multiple chunks
+    assert len(end_frames) == 1
+    # No inline task_artifact frame for this large file.
+    assert not [f for f in sent if f["type"] == "task_artifact"]
+
+    from hermes_hub.protocol import reassemble_artifact_chunks
+
+    assert reassemble_artifact_chunks(chunk_frames) == big_payload
+
+
+def test_spoke_reassembles_inbound_file_before_running_agent(tmp_path):
+    """Task 2.5: artifact_begin/chunk*/end frames received before the task
+    frame are reassembled and written to the task's input directory; the
+    agent runner receives the file's path."""
+    import hashlib
+
+    sent = []
+
+    async def send(frame):
+        sent.append(frame)
+
+    captured = {}
+
+    def agent_that_reads_input_file(
+        *, text, session_id, task_id, context_id, spoke_name, output_dir, input_files
+    ):
+        captured["input_file_names"] = [p.name for p in input_files]
+        captured["input_file_bytes"] = [p.read_bytes() for p in input_files]
+        return "read the file: " + input_files[0].read_bytes().decode()
+
+    executor = SpokeExecutor(
+        spoke_name="Olive",
+        send=send,
+        session_map=_fresh_session_map(tmp_path),
+        agent_runner=agent_that_reads_input_file,
+        artifact_root=tmp_path / "artifacts",
+    )
+
+    from hermes_hub.protocol import (
+        build_artifact_begin_frame,
+        build_artifact_chunk_frame,
+        build_artifact_end_frame,
+    )
+
+    payload = b"hello from the caller"
+    digest = hashlib.sha256(payload).hexdigest()
+
+    asyncio.run(
+        executor.handle_frame(
+            build_artifact_begin_frame(
+                task_id="t1",
+                artifact_id="inbound_t1",
+                name="input.txt",
+                mime_type="text/plain",
+                total_bytes=len(payload),
+                sha256=digest,
+            )
+        )
+    )
+    asyncio.run(
+        executor.handle_frame(
+            build_artifact_chunk_frame(task_id="t1", artifact_id="inbound_t1", seq=0, data=payload)
+        )
+    )
+    asyncio.run(
+        executor.handle_frame(build_artifact_end_frame(task_id="t1", artifact_id="inbound_t1"))
+    )
+    asyncio.run(
+        executor.handle_frame({"task_id": "t1", "context_id": "c1", "text": "use the file", "type": "task"})
+    )
+
+    assert len(captured["input_file_names"]) == 1
+    assert captured["input_file_names"][0] == "input.txt"
+    assert captured["input_file_bytes"][0] == payload
+    assert sent[-1]["type"] == "task_complete"
+    assert sent[-1]["text"] == "read the file: hello from the caller"
+
+
+def test_spoke_cleans_output_directory_after_task(tmp_path):
+    sent = []
+
+    async def send(frame):
+        sent.append(frame)
+
+    captured_dir = {}
+
+    def agent_that_writes_a_file(*, text, session_id, task_id, context_id, spoke_name, output_dir):
+        captured_dir["path"] = output_dir
+        (output_dir / "result.txt").write_bytes(b"data")
+        return "done"
+
+    executor = SpokeExecutor(
+        spoke_name="Olive",
+        send=send,
+        session_map=_fresh_session_map(tmp_path),
+        agent_runner=agent_that_writes_a_file,
+        artifact_root=tmp_path / "artifacts",
+    )
+
+    asyncio.run(
+        executor.handle_task_frame({"task_id": "t1", "context_id": "c1", "text": "write a file"})
+    )
+
+    assert not captured_dir["path"].exists()

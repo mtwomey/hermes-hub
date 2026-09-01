@@ -99,7 +99,7 @@ def build_hub_app(
 ) -> Starlette:
     """Build the hub's ASGI app: A2A surface + spoke WebSocket endpoint."""
     registry = registry or SpokeRegistry()
-    router = router or Router()
+    router = router or Router(base_url=base_url)
 
     executor = HubExecutor(router=router, timeout_seconds=task_timeout_seconds)
     base_card = build_hub_agent_card(registry, hub_name=hub_name, base_url=base_url)
@@ -155,6 +155,28 @@ def build_hub_app(
                 logger.info("spoke disconnected: %s", spoke_name)
 
     routes.append(WebSocketRoute(SPOKE_WS_PATH, endpoint=spoke_endpoint))
+
+    async def download_artifact(request):
+        task_id = request.path_params["task_id"]
+        artifact_id = request.path_params["artifact_id"]
+        from . import artifacts as _artifacts
+
+        ref = _artifacts.load_artifact_metadata(task_id, artifact_id)
+        if ref is None:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        from starlette.responses import FileResponse
+
+        return FileResponse(ref.path, media_type=ref.mime_type, filename=ref.name)
+
+    from .artifacts import ARTIFACT_DOWNLOAD_PATH
+
+    routes.append(
+        Route(
+            f"{ARTIFACT_DOWNLOAD_PATH}/{{task_id}}/{{artifact_id}}",
+            endpoint=download_artifact,
+            methods=["GET"],
+        )
+    )
 
     async def health(request):
         return JSONResponse({"status": "ok", "connected_spokes": [s.name for s in registry.list_connected()]})
