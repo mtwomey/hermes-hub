@@ -72,26 +72,35 @@ implemented wrong — see §4).
 | V8 | Hub placement | **Pumpkin now; portable to always-on hardware (Raspberry Pi / Linux box) later.** Hub code stays pure-Python with no macOS-only dependencies. | Keeps the move cheap when it happens. Hub must not grow a dependency on Hermes core internals. |
 | V9 | First proof of usefulness | **File transfer into real work** — scenario 2 above. | Chosen over remote-tool and remote-reasoning scenarios. Drives artifact support to the front of the queue (see §4 — it is currently the biggest gap). |
 | V10 | Local Hermes is a spoke too | **Pumpkin's own Hermes auto-connects to the hub as a spoke**, alongside Olive. | Uniform model: the desktop session reaches every machine the same way, including its own. No special-casing "local." Also means no manual process starting (see V1). |
+| V11 | Client agnosticism | **The hub is not Hermes-specific.** Any A2A-compliant client is a first-class caller — Claude Desktop, `curl`, future tools. Hermes is the *primary* client, never a *required* one. | Corrects a design error caught 2026-09-01: an injection-based async story would have made "must be a Hermes agent" a structural requirement of the hub, contradicting V8's portability intent. |
+| V12 | Async delivery mechanism | **Durable mailbox + client-side polling**, using A2A's own `GetTask`. The hub stores task state and results; clients retrieve on their own schedule. **No push, no injection, no webhooks in the hub.** | The only client-agnostic option, and it is spec-native. Rejected: gateway message injection (Hermes-only, violates V11), webhooks (needs an inbound listener on the client — the exact thing V2 exists to avoid; also hermes-peer's D14). Hermes-specific conveniences (e.g. auto-surfacing a result via `inject_message`) may exist as an optional *client-side* layer, never in the hub. |
+| V13 | Non-Hermes access path | **An MCP server fronting the hub** is the intended integration for MCP-native clients like Claude Desktop. | Claude Desktop speaks MCP natively; asking it to speak raw A2A is friction with no benefit. The MCP server is a thin adapter over the hub's existing A2A surface — an additional front door, not a second protocol in the core. |
 
 ---
 
 ## 3. Target architecture
 
 ```
-   Hermes desktop session (Pumpkin)
-            │  model calls peer_* tools in-conversation
-            ▼
-   ┌──────────────────┐        outbound WS         ┌────────────────┐
-   │       HUB        │◄───────────────────────────│ Spoke: Olive   │
-   │  (Pumpkin now,   │◄──────────────────┐        │ (managed Mac,  │
-   │   RPi later)     │                   │        │  inbound       │
-   │                  │                   │        │  BLOCKED — ok) │
-   │ • only listener  │                   │        └────────────────┘
-   │ • spoke registry │                   │
-   │ • per-peer authz │           outbound WS      ┌────────────────┐
-   │ • A2A externally │◄──────────────────────────►│ Spoke: Pumpkin │
-   └──────────────────┘                            │ (local Hermes) │
-                                                   └────────────────┘
+  CALLERS (any A2A client — V11)
+  ┌─────────────────────┐  ┌──────────────────┐  ┌──────────┐
+  │ Hermes desktop      │  │ Claude Desktop   │  │ curl /   │
+  │ session (peer_*     │  │ (via MCP adapter │  │ future   │
+  │ model tools)        │  │  — V13)          │  │ clients  │
+  └──────────┬──────────┘  └────────┬─────────┘  └────┬─────┘
+             │                      │                 │
+             └──────────────┬───────┴─────────────────┘
+                            ▼
+   ┌────────────────────────────────────┐        outbound WS    ┌────────────────┐
+   │              HUB                   │◄──────────────────────│ Spoke: Olive   │
+   │      (Pumpkin now, RPi later)      │◄─────────────┐        │ (managed Mac,  │
+   │                                    │              │        │  inbound       │
+   │ • the ONLY listener                │              │        │  BLOCKED — ok) │
+   │ • spoke registry                   │              │        └────────────────┘
+   │ • per-peer authorization (V5)      │              │
+   │ • durable task mailbox (V12)       │       outbound WS     ┌────────────────┐
+   │ • A2A externally; client-agnostic  │◄─────────────────────►│ Spoke: Pumpkin │
+   │ • NO push / NO injection           │                       │ (local Hermes) │
+   └────────────────────────────────────┘                       └────────────────┘
 ```
 
 Properties that matter:
@@ -99,11 +108,15 @@ Properties that matter:
 - **No spoke ever binds a listening socket.** This is the whole reason the
   hub exists. Any change that reintroduces an inbound requirement on a spoke
   is a regression against V2.
-- **The hub is standalone.** No dependency on Hermes core internals, so it can
-  move hosts without touching Hermes (V8).
-- **The hub speaks A2A externally.** An outside caller (curl, or a future
-  non-Hermes A2A client) sees a normal, spec-compliant A2A agent. Hub-and-spoke
-  is an internal routing detail.
+- **No caller is required to bind a listening socket either.** Async results
+  are polled from the mailbox, never pushed (V12). This is what keeps a
+  laptop client, a phone, or a sandboxed desktop app viable as a caller.
+- **The hub is standalone and client-agnostic.** No dependency on Hermes core
+  internals (V8), and nothing in its contract assumes the caller is Hermes
+  (V11). It can move hosts, and it can serve tools that do not exist yet.
+- **The hub speaks A2A externally.** An outside caller sees a normal,
+  spec-compliant A2A agent. Hub-and-spoke is an internal routing detail.
+  The MCP server (V13) is an adapter in front of this, not a parallel core.
 - **Spokes execute with full local authority** (V4), reached only by a caller
   holding that spoke's key (V5).
 
@@ -188,12 +201,22 @@ Not a test: actually pull a real file from one machine and use it to change
 something on the other, in a normal conversation. This is the acceptance gate
 for the whole effort. Everything before it is plumbing.
 
-**W5 — Async / long-running tasks (V6).**
-Design still open. Needs task persistence across disconnects and a mechanism
-to surface a completed result back into a session that has moved on. Absorbs
-hermes-peer's never-built M8.
+**W5 — Async / long-running tasks (V6, V12).**
+Durable task mailbox in the hub: task state and results persist across spoke
+disconnect, hub restart, and client absence. Retrieval is client-side polling
+via A2A's `GetTask`, plus a "what finished that I haven't collected?" query so
+one call surfaces everything pending. **No push, no injection, no webhooks** —
+the hub never requires anything of the client but the ability to ask.
+Absorbs hermes-peer's never-built M8. Open: how a request becomes async in the
+first place (see §7).
 
-**W6 — Hub as always-on hardware (V8).**
+**W6 — MCP adapter for non-Hermes clients (V13).**
+A thin MCP server fronting the hub's existing A2A surface, so Claude Desktop
+and other MCP-native clients are first-class callers. Deliberately an adapter:
+it adds a front door, not a second protocol in the core. Worth building once
+W1–W4 prove the hub is worth connecting to.
+
+**W7 — Hub as always-on hardware (V8).**
 Deferred until W1–W4 prove the value. Linux/RPi deployment, service
 definition, credential storage without macOS Keychain.
 
@@ -201,20 +224,45 @@ definition, credential storage without macOS Keychain.
 
 ## 7. Open questions
 
-1. **How does an async result re-enter a session?** (W5) Notification into the
-   originating conversation? A cron-style delivery? Something else? Undecided.
-2. **What does the model see in `peer_list`?** Skill IDs are machine-ish
+1. **How does a request become async in the first place?** (W5) Model judges
+   it will be slow? Matthew says so explicitly ("ask Olive in the background
+   to...")? Start sync and auto-convert on timeout? Undecided — affects tool
+   schema design, so decide before W5 starts.
+2. **When does a client check the mailbox?** (V12, W5) Polling is the
+   mechanism, but the *cadence* is a client-side UX decision. For Hermes:
+   on demand only, or a nudge at natural boundaries? Note this is genuinely
+   the client's problem, not the hub's — which is the point of V12.
+3. **What does the model see in `peer_list`?** Skill IDs are machine-ish
    (`Olive::general-reasoning`). For V3's "model suggests a peer" to work well,
    descriptions must be genuinely useful prose, not identifiers.
-3. **Spoke identity vs. machine identity.** If Pumpkin runs multiple Hermes
+4. **Spoke identity vs. machine identity.** If Pumpkin runs multiple Hermes
    profiles, is each a distinct spoke? hermes-peer's roadmap listed
    "profile-specific peers"; unresolved.
-4. **What happens to a spoke's in-flight task when the hub restarts?** Related
-   to W5 but distinct — hub restart is more common than spoke disconnect.
+5. **What happens to a spoke's in-flight task when the hub restarts?** W5's
+   mailbox covers *completed* results; an in-flight task at restart is a
+   distinct case. Re-dispatch, fail cleanly, or resume?
+6. **How do per-peer keys (V5) work for a non-Hermes caller?** Hermes clients
+   can use Keychain. Claude Desktop via the MCP adapter (V13) cannot as
+   naturally — does the adapter hold keys on the caller's behalf, and if so
+   does that re-centralize the fleet-wide reach V5 exists to prevent?
 
 ---
 
-## 8. Working agreement for autonomous sessions
+## 8. Rejected approaches
+
+Recorded so they are not re-proposed. Each was seriously considered.
+
+| Approach | Why rejected |
+|---|---|
+| **Mesh topology** (every machine listens) | Structurally fragile on IT-managed endpoints. Proven by real failure: Olive's Jamf/CyberArk-managed firewall blocks inbound with no self-service fix. This is what hermes-peer built and what hermes-hub exists to replace. |
+| **Gateway message injection for async results** | Hermes-runtime-specific. Would have made "must be a Hermes agent" a structural requirement of the hub, contradicting V11. Still viable as an *optional client-side* convenience for Hermes callers; never in the hub. |
+| **Webhooks / push notifications to callers** | Requires the caller to accept an inbound connection — precisely the constraint V2 exists to eliminate. Also adds an SSRF surface and retry machinery to solve what a mailbox already solves. Matches hermes-peer's D14. |
+| **Injecting live peer capabilities into the system prompt** | Breaks per-conversation prompt caching, which Hermes treats as sacred — every spoke connect/disconnect would invalidate the cache for every open session. Replaced by V3's on-demand discovery. |
+| **Queueing tasks for offline spokes** | YAGNI for now (hermes-hub H10). A request to an offline spoke fails fast with a clear error. Revisit only if real usage demands it. Note this is distinct from the *result* mailbox in V12, which is not optional. |
+
+---
+
+## 9. Working agreement for autonomous sessions
 
 Added after a 2026-09-01 audit found an autonomous session had exceeded its
 stated scope and recorded a cleanup claim that was false (a tunnel it said it
