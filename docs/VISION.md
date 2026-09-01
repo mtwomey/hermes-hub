@@ -137,36 +137,41 @@ Two working codebases, neither of which is the product yet.
 | Capability | hermes-peer (mesh) | hermes-hub (hub-spoke) | Target |
 |---|---|---|---|
 | In-session model tools | ✅ 6 tools (`peer_ask`, `peer_list`, `peer_info`, `peer_discover`, `peer_status`, `peer_fetch_artifact`) | ❌ **none** — CLI only | **Required (V1)** |
-| Artifacts / file transfer | ✅ inline + authenticated URL, SHA-256, verified to 100KB | ❌ **not wired at all** — `build_task_artifact_frame` exists and is unit-tested but is *never called*; the spoke emits only status/complete/failed, and the hub's `task_artifact` handler can never fire. No inbound file path either. | **Required (V9)** |
+| Artifacts / file transfer | ✅ inline + authenticated URL, SHA-256, verified to 100KB | ✅ **wired and verified** — binary-safe chunked transport spoke↔hub↔caller, SHA-256 verified end-to-end, inline under 64KB and chunked over it, hub serves the download URL behind existing bearer auth, inbound (caller→spoke) files supported. Verified live with a genuine 500KB `/dev/urandom` binary, byte-identical retrieval, and confirmed multi-frame chunking. See `.hermes/plans/2026-09-01_100000-w1-w2-auth-and-artifacts.md` Gate 2, `.hermes/evidence/w2-gate2.md`. | **Required (V9)** |
 | Loads into the live session | ✅ `.pth` + gateway shim | ❌ standalone by design | **Required (V1/V10)** |
 | Survives Olive's firewall | ❌ inbound blocked | ✅ solved, proven | **Required (V2)** |
-| Per-peer authorization | ✅ per-peer Keychain tokens | ❌ **single shared token, no per-spoke check** | **Required (V5)** |
+| Per-peer authorization | ✅ per-peer Keychain tokens | ✅ **spoke-enforced per-peer credentials (V5a)** — opaque credential travels hub-relayed (never validated/stored/logged by the hub) and spoke-checked via `hmac.compare_digest` before any agent invocation. Verified live: wrong/missing credential fails with the agent never invoked; correct credential succeeds; hub log grepped for the credential value with 0 matches. See `.hermes/plans/2026-09-01_100000-w1-w2-auth-and-artifacts.md` Gate 1, `.hermes/evidence/w1-gate1.md`. | **Required (V5)** |
 | Multi-turn continuity | ✅ verified | ✅ verified (independently re-verified 2026-09-01) | Keep |
 | Incremental streaming | ✅ verified | ✅ verified (independently re-verified 2026-09-01) | Keep |
 | Async / resumable tasks | ❌ planned as M8, never built | ❌ not built | **Required (V6)** |
 
-**The blunt read:** hermes-hub solved the transport problem correctly and
-dropped both things that make the feature *useful* — the tool surface and
-real artifact handling. hermes-peer has those but can't reach Olive. Neither
-alone delivers the vision.
+**The blunt read (updated 2026-09-01):** hermes-hub solved the transport
+problem correctly and, as of W1+W2, has closed both defects that stood
+between it and being genuinely usable — per-spoke authorization and real
+artifact handling. It still lacks the in-session tool surface (W3) that
+hermes-peer has and that makes the vision's conversational interaction
+actually happen. hermes-peer remains ahead on that one row only.
 
 **The synthesis is the work:** hermes-hub's transport + hermes-peer's tool
 surface and artifact handling + per-peer keys + local-Hermes-as-spoke.
 
-### Known defects to fix (not new features)
+### Known defects — fixed 2026-09-01 (W1+W2)
 
-1. **hermes-hub has no per-spoke authorization.** `Router.route_task()` looks
-   up a spoke by name and sends, with no permission check. Its own decision
-   record (H8) called for per-spoke tokens; the implementation collapsed to a
-   single shared `expected_spoke_token`. No gate caught it because no gate
-   asked. Violates V5.
-2. **hermes-hub artifact transport does not exist.** `build_task_artifact_frame`
-   is defined and unit-tested but never called by any production code path —
-   the spoke emits only `task_status`/`task_complete`/`task_failed`, so the
-   hub's `task_artifact` handler is unreachable. There is also no inbound
-   (caller→spoke) file path. `protocol.py`'s docstring describing
-   "inline-text-only" support overstates what is actually wired. Directly
-   blocks V9, the chosen first real task.
+Both items below were open defects as of the 2026-09-01 audit; both are now
+closed by the W1+W2 plan (`.hermes/plans/2026-09-01_100000-w1-w2-auth-and-artifacts.md`,
+evidence in `.hermes/evidence/w1-gate1.md`, `w2-gate2.md`,
+`w1-w2-completion-matrix.md`). Kept here as history, not as open items:
+
+1. ~~**hermes-hub has no per-spoke authorization.**~~ Fixed: `Router.route_task()`
+   relays an opaque per-spoke credential (never validating or storing it);
+   `SpokeExecutor` compares it against a locally-resolved secret via
+   `hmac.compare_digest` before any agent invocation. Violates V5 no longer.
+2. ~~**hermes-hub artifact transport does not exist.**~~ Fixed:
+   `build_task_artifact_frame` is now called by the spoke after every agent
+   turn (inline under 64KB, chunked above via `artifact_begin`/`chunk`/`end`);
+   the hub's `task_artifact` handling reassembles, verifies SHA-256, stores,
+   and serves a download URL behind existing bearer auth. Inbound
+   (caller→spoke) files are also supported. No longer blocks V9.
 
 ---
 
