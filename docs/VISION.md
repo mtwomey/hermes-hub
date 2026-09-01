@@ -66,7 +66,9 @@ implemented wrong — see §4).
 | V2 | Transport | **Hub-and-spoke over outbound-only WebSocket** (hermes-hub's H2/H3). | Proven necessary: Olive is Jamf/CyberArk-managed, inbound is blocked, and no self-service fix exists. Mesh is structurally fragile on managed endpoints. |
 | V3 | Capability discovery | **Both explicit naming and model inference**, implemented **cache-safely**: a short static line in the system prompt plus rich `peer_list`/`peer_info` tool descriptions. Peer capabilities are fetched on demand, never injected into the system prompt. | Hermes treats per-conversation prompt caching as sacred. Injecting live peer state would invalidate the cache for every open session on every spoke connect/disconnect. Cost: the model makes a visible discovery call instead of "just knowing." Accepted. |
 | V4 | Remote permissions | **Full side effects allowed.** A peer may write files, run commands, and use side-effecting tools. | All machines are Matthew's. Mirrors hermes-peer D8. See V5 for the security consequence this creates and how it is bounded. |
-| V5 | Authorization model | **Per-peer keys.** Addressing a specific spoke requires holding a key for *that* spoke. The hub authenticates two independent things: (a) a spoke's right to join, (b) a caller's right to address a named spoke. | Restores hermes-peer's mesh property that compromising one key reaches one machine. Without this, V4 means one token = side-effecting execution across the entire fleet, including a corporate laptop. **hermes-hub as built has only a single shared token and NO per-spoke authorization check — this is a defect to fix, not a design to keep.** |
+| V5 | Authorization model | **Per-peer keys, enforced at the SPOKE, not the hub.** Three distinct auth questions: (a) may this spoke join? — hub checks, (b) may this caller reach the hub? — hub checks, (c) may this caller command *this specific spoke*? — **the spoke checks, using its own local secret**. The hub relays the caller's credential opaquely: never validates it, never stores it. | Restores the mesh property that compromising one key reaches one machine. Hub-side enforcement would NOT achieve this — a hub holding verification material for every spoke is a single point of total compromise, exactly what this decision prevents. Keeping the hub out of the trust path is also what makes V8 (hub on a cheap always-on box) safe. **hermes-hub as built has a single shared token and NO per-spoke check anywhere — a defect to fix, not a design to keep.** |
+| V5a | Credential form (now) | **Shared per-spoke secret** carried in an opaque credential field on the task frame; spoke compares against its own Keychain entry before executing. | Option B of four considered. Buys the "hub is not a fleet-wide key" property at roughly the cost of the weaker hub-side alternative. **Accepted residual risk:** the hub sees credentials in flight and could replay them. Acceptable for two personal machines on a trusted LAN; this is precisely what V5b fixes. |
+| V5b | Credential form (planned) | **Request signing / keypair auth.** The spoke verifies a signature instead of comparing a secret; the hub can no longer forge or usefully replay. | Already on hermes-peer's original roadmap ("keypair auth / request signing"). **Design constraint on V5a: the credential field MUST be opaque bytes with no assumed structure, so moving to signatures changes only what the caller puts in and what the spoke checks — no change to the hub, the frames, or routing.** If V5a is built in a way that makes V5b expensive, V5a was built wrong. |
 | V6 | Execution mode | **Synchronous by default; asynchronous for long work.** | Sync matches normal tool-call ergonomics. Async requires task persistence and a way to surface results back into a session later — real work, previously deferred as hermes-peer M8 and never built. Design is open (see §6). |
 | V7 | Direction | **Bidirectional and symmetric.** Either machine can ask the other. | Consequence: with the hub on Pumpkin, Olive can reach nothing while Pumpkin sleeps. Accepted for now; the main argument for always-on hub hardware later. |
 | V8 | Hub placement | **Pumpkin now; portable to always-on hardware (Raspberry Pi / Linux box) later.** Hub code stays pure-Python with no macOS-only dependencies. | Keeps the move cheap when it happens. Hub must not grow a dependency on Hermes core internals. |
@@ -74,7 +76,7 @@ implemented wrong — see §4).
 | V10 | Local Hermes is a spoke too | **Pumpkin's own Hermes auto-connects to the hub as a spoke**, alongside Olive. | Uniform model: the desktop session reaches every machine the same way, including its own. No special-casing "local." Also means no manual process starting (see V1). |
 | V11 | Client agnosticism | **The hub is not Hermes-specific.** Any A2A-compliant client is a first-class caller — Claude Desktop, `curl`, future tools. Hermes is the *primary* client, never a *required* one. | Corrects a design error caught 2026-09-01: an injection-based async story would have made "must be a Hermes agent" a structural requirement of the hub, contradicting V8's portability intent. |
 | V12 | Async delivery mechanism | **Durable mailbox + client-side polling**, using A2A's own `GetTask`. The hub stores task state and results; clients retrieve on their own schedule. **No push, no injection, no webhooks in the hub.** | The only client-agnostic option, and it is spec-native. Rejected: gateway message injection (Hermes-only, violates V11), webhooks (needs an inbound listener on the client — the exact thing V2 exists to avoid; also hermes-peer's D14). Hermes-specific conveniences (e.g. auto-surfacing a result via `inject_message`) may exist as an optional *client-side* layer, never in the hub. |
-| V13 | Non-Hermes access path | **An MCP server fronting the hub** is the intended integration for MCP-native clients like Claude Desktop. | Claude Desktop speaks MCP natively; asking it to speak raw A2A is friction with no benefit. The MCP server is a thin adapter over the hub's existing A2A surface — an additional front door, not a second protocol in the core. |
+| V13 | Non-Hermes access path | **An MCP server fronting the hub** is the intended integration for MCP-native clients like Claude Desktop. **Rule: the adapter is always deployed local to its client, holding only that machine's credentials — never as a shared remote service.** | Claude Desktop speaks MCP natively; asking it to speak raw A2A is friction with no benefit. The MCP server is a thin adapter over the hub's existing A2A surface — an additional front door, not a second protocol in the core. The locality rule matters: a *shared* adapter holding every client's per-spoke keys would become exactly the fleet-wide concentration point V5 exists to prevent. Local to its client, it is merely a credential holder — structurally the same as Hermes reading the Keychain. |
 
 ---
 
@@ -117,8 +119,13 @@ Properties that matter:
 - **The hub speaks A2A externally.** An outside caller sees a normal,
   spec-compliant A2A agent. Hub-and-spoke is an internal routing detail.
   The MCP server (V13) is an adapter in front of this, not a parallel core.
-- **Spokes execute with full local authority** (V4), reached only by a caller
-  holding that spoke's key (V5).
+- **The hub is untrusted for authorization.** It routes; it does not decide
+  who may command a spoke (V5). It holds no per-spoke verification material
+  and relays caller credentials opaquely. Compromising the hub yields traffic
+  and reachability, **not** the ability to command the fleet. This is what
+  makes V8's "put it on a Raspberry Pi in a closet" safe.
+- **Spokes execute with full local authority** (V4) — and therefore each spoke
+  is the enforcement point for whether a given caller may command it (V5).
 
 ---
 
@@ -180,10 +187,18 @@ test.
 Ordered by dependency, not priority. Each becomes its own gated tactical plan
 under `.hermes/plans/`; this document only sets scope and intent.
 
-**W1 — Per-peer authorization (defect, V5).**
-Replace the single shared token with per-spoke keys. Hub validates spoke
-identity at connect *and* caller authorization per addressed spoke. Keychain-backed
-on macOS; portable equivalent on Linux for the future RPi hub.
+**W1 — Per-peer authorization (defect, V5/V5a).**
+Replace the single shared token with spoke-enforced per-peer credentials.
+Concretely: add an **opaque** credential field to the task frame (currently
+`{type, task_id, context_id, text, metadata}` — there is nowhere for caller
+authorization to travel); the caller supplies its per-spoke secret; the hub
+relays it without validating or storing it; the spoke checks it against its
+own Keychain entry **before executing** (today the spoke validates nothing
+about an inbound task and will run anything that arrives on its socket).
+Keychain-backed on macOS; portable equivalent for the future Linux/RPi hub.
+**The credential field must carry opaque bytes with no assumed structure** so
+V5b (signatures) is a later change to the endpoints only, never to the hub or
+the wire format.
 
 **W2 — Real artifact transfer (defect, V9).**
 Binary-safe, size-tolerant file movement spoke→hub→caller and back, SHA-256
@@ -241,10 +256,12 @@ definition, credential storage without macOS Keychain.
 5. **What happens to a spoke's in-flight task when the hub restarts?** W5's
    mailbox covers *completed* results; an in-flight task at restart is a
    distinct case. Re-dispatch, fail cleanly, or resume?
-6. **How do per-peer keys (V5) work for a non-Hermes caller?** Hermes clients
-   can use Keychain. Claude Desktop via the MCP adapter (V13) cannot as
-   naturally — does the adapter hold keys on the caller's behalf, and if so
-   does that re-centralize the fleet-wide reach V5 exists to prevent?
+6. **Credential distribution and rotation.** V5a needs a per-spoke secret on
+   both the caller and the spoke. How is it generated, delivered to both ends,
+   and rotated? hermes-peer did this by hand — workable for two machines,
+   awkward beyond that. (Open question 6 previously asked how per-peer keys
+   work for a non-Hermes caller; that is now answered by V13's locality rule —
+   the adapter runs local to its client and holds only that machine's keys.)
 
 ---
 
@@ -258,6 +275,8 @@ Recorded so they are not re-proposed. Each was seriously considered.
 | **Gateway message injection for async results** | Hermes-runtime-specific. Would have made "must be a Hermes agent" a structural requirement of the hub, contradicting V11. Still viable as an *optional client-side* convenience for Hermes callers; never in the hub. |
 | **Webhooks / push notifications to callers** | Requires the caller to accept an inbound connection — precisely the constraint V2 exists to eliminate. Also adds an SSRF surface and retry machinery to solve what a mailbox already solves. Matches hermes-peer's D14. |
 | **Injecting live peer capabilities into the system prompt** | Breaks per-conversation prompt caching, which Hermes treats as sacred — every spoke connect/disconnect would invalidate the cache for every open session. Replaced by V3's on-demand discovery. |
+| **Hub-side per-spoke tokens** | Option A of four. Closes the "no check at all" gap, but the hub would hold verification material for every spoke — one compromise still commands the fleet, which is the exact property V5 exists to prevent. Cosmetic security. Rejected in favour of spoke-side enforcement (V5a) at comparable cost. |
+| **Attenuable capability tokens** (macaroons / biscuits) | Option D of four. Genuinely elegant — unforgeable, with native delegation that would make the MCP-adapter question disappear structurally. Over-engineered for two laptops and one hub. Revisit only if the fleet grows or third-party callers become real. |
 | **Queueing tasks for offline spokes** | YAGNI for now (hermes-hub H10). A request to an offline spoke fails fast with a clear error. Revisit only if real usage demands it. Note this is distinct from the *result* mailbox in V12, which is not optional. |
 
 ---
