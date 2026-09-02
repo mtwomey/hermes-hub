@@ -18,5 +18,6 @@ if __name__ == "__main__":
         base_url=runtime.base_url,
         expected_external_token=runtime.external_token,
         expected_spoke_token=runtime.spoke_token,
+        task_timeout_seconds=runtime.task_timeout_seconds,
     )
     uvicorn.run(app, host=runtime.host, port=runtime.port, log_level="info")

@@ -94,7 +94,7 @@ class Router:
         metadata: Optional[Dict[str, Any]] = None,
         credential: str = "",
         inbound_file: Optional[Dict[str, Any]] = None,
-        timeout_seconds: float = 120.0,
+        timeout_seconds: float = 300.0,
     ) -> AsyncIterator[Dict[str, Any]]:
         """Send a task to ``spoke_name`` and yield every frame it emits, in
         arrival order, until a terminal frame (complete/failed) or timeout.

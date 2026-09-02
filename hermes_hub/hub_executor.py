@@ -86,7 +86,7 @@ async def open_task(context: RequestContext, event_queue: EventQueue) -> TaskUpd
 class HubExecutor(AgentExecutor):
     """Routes an inbound A2A task to the named spoke via :class:`Router`."""
 
-    def __init__(self, *, router: Router, timeout_seconds: float = 120.0) -> None:
+    def __init__(self, *, router: Router, timeout_seconds: float = 300.0) -> None:
         self.router = router
         self.timeout_seconds = timeout_seconds
 

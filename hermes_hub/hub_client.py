@@ -38,7 +38,12 @@ import httpx
 #: Every A2A HTTP request needs this header.
 A2A_VERSION_HEADER = {"A2A-Version": "1.0"}
 
-DEFAULT_TIMEOUT_SECONDS = 180.0
+#: Client-side HTTP read timeout. Must exceed the hub's own per-task
+#: timeout_seconds (HubExecutor/Router, default 300s / HERMES_HUB_TASK_TIMEOUT_SECONDS)
+#: with headroom, or this client gives up before the hub even reports its own
+#: timeout -- reproducing the same "task failed with no diagnostic" illusion
+#: this constant exists to prevent. Keep >= hub task timeout + 30s buffer.
+DEFAULT_TIMEOUT_SECONDS = 330.0
 
 
 class HubClientError(RuntimeError):

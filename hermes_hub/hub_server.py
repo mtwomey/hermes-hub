@@ -95,7 +95,7 @@ def build_hub_app(
     base_url: str = "http://127.0.0.1:8770",
     expected_spoke_token: str = "",
     expected_external_token: str = "",
-    task_timeout_seconds: float = 120.0,
+    task_timeout_seconds: float = 300.0,
 ) -> Starlette:
     """Build the hub's ASGI app: A2A surface + spoke WebSocket endpoint."""
     registry = registry or SpokeRegistry()

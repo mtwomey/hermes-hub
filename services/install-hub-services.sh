@@ -24,6 +24,7 @@ HERMES_AGENT_VENV="${HERMES_AGENT_VENV:-$HOMES_DIR/hermes-agent/venv}"
 HUB_HOST="${HUB_HOST:-127.0.0.1}"
 HUB_PORT="${HUB_PORT:-8770}"
 HUB_PUBLIC_URL="${HUB_PUBLIC_URL:-http://${HUB_HOST}:${HUB_PORT}}"
+HUB_TASK_TIMEOUT_SECONDS="${HUB_TASK_TIMEOUT_SECONDS:-300}"
 SPOKE_NAME="${SPOKE_NAME:-Pumpkin}"
 LAUNCH_AGENTS_DIR="${LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
 
@@ -77,6 +78,7 @@ render_template() {
         -e "s#__HUB_HOST__#$HUB_HOST#g" \
         -e "s#__HUB_PORT__#$HUB_PORT#g" \
         -e "s#__HUB_PUBLIC_URL__#$HUB_PUBLIC_URL#g" \
+        -e "s#__HUB_TASK_TIMEOUT_SECONDS__#$HUB_TASK_TIMEOUT_SECONDS#g" \
         -e "s#__SPOKE_NAME__#$SPOKE_NAME#g" \
         -e "s#__LOG_DIR__#$LOG_DIR#g" \
         "$template" > "$out"
@@ -175,8 +177,8 @@ show_help() {
     echo "  reinstall  - uninstall then install"
     echo ""
     echo "Never touches ai.hermes.gateway. Env overrides: HOMES_DIR, LOG_DIR,"
-    echo "HUB_VENV, HERMES_AGENT_VENV, HUB_HOST, HUB_PORT, HUB_PUBLIC_URL, SPOKE_NAME,"
-    echo "LAUNCH_AGENTS_DIR."
+    echo "HUB_VENV, HERMES_AGENT_VENV, HUB_HOST, HUB_PORT, HUB_PUBLIC_URL,"
+    echo "HUB_TASK_TIMEOUT_SECONDS, SPOKE_NAME, LAUNCH_AGENTS_DIR."
 }
 
 case "${1:-status}" in
