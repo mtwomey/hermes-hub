@@ -99,6 +99,7 @@ def test_dry_run_install_generates_valid_plists(tmp_path):
     assert hub_data["KeepAlive"] is True
     assert hub_data["RunAtLoad"] is True
     assert hub_data["EnvironmentVariables"]["HERMES_HUB_PORT"] == "8770"
+    assert hub_data["EnvironmentVariables"]["HERMES_HUB_PUBLIC_URL"] == "http://127.0.0.1:8770"
     assert hub_data["EnvironmentVariables"]["HERMES_HUB_REPO"] == str(REPO_ROOT)
     # No absolute-path placeholders left un-substituted.
     assert "__" not in "".join(hub_data["ProgramArguments"])

@@ -1,16 +1,22 @@
-"""Gate 3 live test: runs the real hub app (build_hub_app) via uvicorn."""
+"""Run the managed hub with endpoint configuration and Keychain credentials."""
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-sys.path.insert(0, "/Users/mtwomey/Git_Repos/hermes-hub")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import uvicorn
 
+from hermes_hub.hub_runtime import resolve_hub_runtime
 from hermes_hub.hub_server import build_hub_app
 
 if __name__ == "__main__":
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8770
-    app = build_hub_app(base_url=f"http://127.0.0.1:{port}")
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+    runtime = resolve_hub_runtime()
+    app = build_hub_app(
+        base_url=runtime.base_url,
+        expected_external_token=runtime.external_token,
+        expected_spoke_token=runtime.spoke_token,
+    )
+    uvicorn.run(app, host=runtime.host, port=runtime.port, log_level="info")

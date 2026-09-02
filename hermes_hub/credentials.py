@@ -35,6 +35,32 @@ def _keychain_account(spoke_name: str) -> str:
     return f"spoke:{spoke_name}:credential"
 
 
+def _read_keychain_account(account: str) -> str:
+    """Read one Keychain account without exposing its value outside process memory."""
+    security_path = shutil.which("security")
+    if not security_path:
+        return ""
+    try:
+        proc = subprocess.run(
+            [security_path, "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+    except OSError:
+        return ""
+    return (proc.stdout or "").rstrip("\n") if proc.returncode == 0 else ""
+
+
+def require_hub_credentials() -> tuple[str, str]:
+    """Return managed hub external/spoke tokens from Keychain or fail closed."""
+    external = _read_keychain_account("hub:external:token")
+    spoke = _read_keychain_account("hub:spoke:token")
+    if not external or not spoke:
+        raise CredentialUnavailable("managed hub requires Keychain hub credentials")
+    return external, spoke
+
+
 def _read_keychain(spoke_name: str) -> str:
     """Best-effort macOS Keychain read. Returns "" on any failure, missing
     binary, or non-macOS host -- never raises."""

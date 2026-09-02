@@ -56,7 +56,9 @@ async def main(port: int, spoke_name: str) -> None:
     client = SpokeClient(
         hub_url=f"ws://127.0.0.1:{port}/hub/v1/spoke",
         name=spoke_name,
-        token="",
+        # The managed hub requires the same Keychain-backed spoke credential
+        # at the WebSocket registration boundary; it stays in process memory.
+        token=expected_credential,
         skills=[
             {
                 "id": "general-reasoning",
