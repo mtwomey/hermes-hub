@@ -14,9 +14,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from pathlib import Path
 
-sys.path.insert(0, "/Users/mtwomey/Git_Repos/hermes-hub")
-sys.path.insert(0, "/Users/mtwomey/.hermes/hermes-agent")
+# This script is executed from each machine's own checkout. Never hardcode
+# Pumpkin's home directory: remote spokes must import their local copy.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from hermes_hub.config import resolve_spoke_hub_url, resolve_spoke_name
 from hermes_hub.credentials import CredentialUnavailable, require_spoke_credential
