@@ -9,9 +9,11 @@ V10 M1–M3 installs two user LaunchAgents on Pumpkin:
 
 The installer is `services/install-hub-services.sh`. It owns only these two labels. It must never target `ai.hermes.gateway`.
 
-## M4: after a reboot or logout/login
+## M4: verified after reboot
 
-M4 is human-only. Once the Aqua login session is available again, run:
+**M4 passed on 2026-09-01.** After Matthew rebooted Pumpkin, both user LaunchAgents started without terminal intervention, the hub listened on `127.0.0.1:8770`, `/health` listed `Pumpkin`, and the installed `peer_list` model tool returned Pumpkin. Evidence: `.hermes/evidence/v10-m4-cold-boot.md`.
+
+For future diagnosis after a reboot or logout/login:
 
 ```bash
 launchctl list | grep -E 'ai\.hermes\.(hub|spoke)'
@@ -53,6 +55,8 @@ security delete-generic-password -s hermes-hub -a 'spoke:Pumpkin:credential'
 security delete-generic-password -s hermes-hub -a 'caller:Pumpkin:credential'
 ```
 
-## Unverified until M4
+## Verified M4 behavior
 
-M1–M3 prove supervised runtime operation, explicit hub/spoke kill-and-recovery, Keychain posture, and operation after the hand-started foreground processes were ended. They **do not** prove survival across a cold boot, logout/login, Keychain availability immediately after login, or launchd session-policy behavior after reboot. M4 must not be marked passed until Matthew performs the above check.
+M1–M4 prove supervised runtime operation, explicit hub/spoke kill-and-recovery, Keychain posture, operation after the hand-started foreground processes were ended, and automatic startup/reconnection across Matthew's reboot. See `.hermes/evidence/v10-m4-cold-boot.md`.
+
+Normal operations still require the Aqua user session to be available: these are user LaunchAgents, not system daemons. Future changes to LaunchAgent policy, credential access, or operating-system behavior require rerunning the diagnostic checklist above.
