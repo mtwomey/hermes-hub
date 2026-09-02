@@ -145,7 +145,7 @@ Two working codebases, neither of which is the product yet.
 | Incremental streaming | ✅ verified | ✅ verified (independently re-verified 2026-09-01) | Keep |
 | Async / resumable tasks | ❌ planned as M8, never built | ❌ not built | **Required (V6)** |
 
-**The blunt read (updated 2026-09-01):** hermes-hub has the transport, per-spoke authorization, artifact handling, and W3 in-session tool surface required for the product path. V10 M1–M4 prove that Pumpkin's local hub and spoke run as supervised launchd services, survive a reboot, and reconnect without terminal intervention. The next acceptance gate is W4: use a real cross-machine file transfer to complete real work.
+**The blunt read (updated 2026-09-02):** hermes-hub has the transport, per-spoke authorization, artifact handling, and in-session tool surface required for the product path. **W4 Gates 1–3 passed:** a normal Pumpkin conversation selected `peer_ask` for a natural-language request, Olive read and returned its real `cldsi-dev-support-dbt` pipeline README as an artifact, and Pumpkin verified the source/destination SHA-256 end to end. The task used Olive's direct outbound LAN WebSocket to Pumpkin's hub; no firewall change was made. Evidence: `.hermes/evidence/w4-m1-olive-credentials.md` and `w4-m3-real-task.md`. **Olive reboot survival remains unverified:** M4 is reserved for Matthew; see `docs/OLIVE.md`.
 
 **The synthesis is the work:** hermes-hub's transport + hermes-peer's tool
 surface and artifact handling + per-peer keys + local-Hermes-as-spoke.
