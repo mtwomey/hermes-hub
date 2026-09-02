@@ -57,6 +57,15 @@ def test_every_handler_returns_a_json_string():
         assert parsed["error"]
 
 
+def test_resolve_hub_token_falls_back_to_keychain_when_config_is_empty(monkeypatch):
+    """W4 M2: installed model tools must use the managed Keychain bearer
+    token when the legacy JSON config has no token."""
+    monkeypatch.delenv(peer_tools.ENV_HUB_TOKEN, raising=False)
+    monkeypatch.setattr(peer_tools, "_load_config", lambda: {})
+    monkeypatch.setattr(peer_tools, "_keychain_read", lambda account: "keychain-token")
+    assert peer_tools.resolve_hub_token() == "keychain-token"
+
+
 # -- peer_list --------------------------------------------------------------
 
 

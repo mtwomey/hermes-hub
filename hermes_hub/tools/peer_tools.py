@@ -103,7 +103,10 @@ def resolve_hub_token(explicit: str = "") -> str:
     env = os.environ.get(ENV_HUB_TOKEN, "")
     if env:
         return env
-    return str(_load_config().get("hub_token") or "")
+    configured = str(_load_config().get("hub_token") or "")
+    if configured:
+        return configured
+    return _keychain_read("hub:external:token")
 
 
 def _keychain_read(account: str) -> str:
