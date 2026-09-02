@@ -21,6 +21,8 @@
         <string>__REPO_DIR__</string>
         <key>HERMES_HUB_PORT</key>
         <string>__HUB_PORT__</string>
+        <key>HERMES_HUB_HOST</key>
+        <string>__HUB_HOST__</string>
         <key>HERMES_HUB_SPOKE_NAME</key>
         <string>__SPOKE_NAME__</string>
     </dict>
