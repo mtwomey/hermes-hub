@@ -58,6 +58,21 @@ def test_client_sends_registration_frame_on_connect():
     assert received[0]["skills"] == [{"id": "general-reasoning"}]
 
 
+def test_client_bypasses_environment_proxies_for_lan_websocket(monkeypatch):
+    captured = {}
+
+    async def fake_connect(*args, **kwargs):
+        captured.update(kwargs)
+        raise OSError("stop after inspecting arguments")
+
+    monkeypatch.setattr("hermes_hub.spoke_client.websockets.connect", fake_connect)
+    client = SpokeClient(hub_url="ws://192.0.2.236:8770/hub/v1/spoke", name="Olive", token="t")
+
+    with pytest.raises(OSError, match="stop after"):
+        asyncio.run(client.connect_once())
+    assert captured["proxy"] is None
+
+
 async def _run_reconnect_with_backoff():
     """Server closes the connection immediately after registering once,
     twice, then accepts and stays open on the third attempt. Assert the

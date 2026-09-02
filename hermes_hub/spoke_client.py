@@ -104,6 +104,9 @@ class SpokeClient:
         websocket = await websockets.connect(
             self.hub_url,
             additional_headers={"Authorization": f"Bearer {self.token}"},
+            # Hub/spoke traffic is LAN-local; proxy autodiscovery can route an
+            # RFC1918 address to an unreachable proxy under launchd.
+            proxy=None,
         )
         frame = build_registration_frame(name=self.name, token=self.token, skills=self.skills)
         await websocket.send(json.dumps(frame))
