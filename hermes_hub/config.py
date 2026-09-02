@@ -17,6 +17,7 @@ import os
 
 ENV_SPOKE_NAME = "HERMES_HUB_SPOKE_NAME"
 DEFAULT_SPOKE_NAME = "Pumpkin"
+ENV_HUB_HOST = "HERMES_HUB_HOST"
 
 
 def resolve_spoke_name(explicit: str = "") -> str:
@@ -28,3 +29,9 @@ def resolve_spoke_name(explicit: str = "") -> str:
     if env_value:
         return env_value
     return DEFAULT_SPOKE_NAME
+
+
+def resolve_spoke_hub_url(port: int) -> str:
+    """Build the outbound spoke WebSocket URL from its non-secret hub host."""
+    host = os.environ.get(ENV_HUB_HOST, "127.0.0.1")
+    return f"ws://{host}:{port}/hub/v1/spoke"

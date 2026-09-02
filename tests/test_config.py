@@ -36,3 +36,10 @@ def test_explicit_argument_wins_over_env(monkeypatch):
 def test_empty_env_value_falls_back_to_default(monkeypatch):
     monkeypatch.setenv(ENV_SPOKE_NAME, "")
     assert resolve_spoke_name() == "Pumpkin"
+
+
+def test_resolve_spoke_hub_url_uses_explicit_remote_host(monkeypatch):
+    from hermes_hub.config import resolve_spoke_hub_url
+
+    monkeypatch.setenv("HERMES_HUB_HOST", "192.0.2.236")
+    assert resolve_spoke_hub_url(8770) == "ws://192.0.2.236:8770/hub/v1/spoke"

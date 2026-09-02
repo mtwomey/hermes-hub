@@ -18,7 +18,7 @@ import sys
 sys.path.insert(0, "/Users/mtwomey/Git_Repos/hermes-hub")
 sys.path.insert(0, "/Users/mtwomey/.hermes/hermes-agent")
 
-from hermes_hub.config import resolve_spoke_name
+from hermes_hub.config import resolve_spoke_hub_url, resolve_spoke_name
 from hermes_hub.credentials import CredentialUnavailable, require_spoke_credential
 from hermes_hub.sessions import SessionMap, SessionStore
 from hermes_hub.spoke_client import SpokeClient
@@ -54,7 +54,7 @@ async def main(port: int, spoke_name: str) -> None:
         await executor.handle_frame(frame)
 
     client = SpokeClient(
-        hub_url=f"ws://127.0.0.1:{port}/hub/v1/spoke",
+        hub_url=resolve_spoke_hub_url(port),
         name=spoke_name,
         # The managed hub requires the same Keychain-backed spoke credential
         # at the WebSocket registration boundary; it stays in process memory.
