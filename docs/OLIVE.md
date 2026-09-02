@@ -1,6 +1,8 @@
 # Olive M4 reboot-survival runbook
 
-M4 is intentionally reserved for Matthew. W4 proved an already-running managed Olive spoke; it did **not** prove survival across a reboot.
+M4 was performed by Matthew and **passed**: after Pumpkin and Olive were rebooted normally, both spokes reappeared automatically and a post-reboot authenticated remote task reached Olive. Evidence: `.hermes/evidence/w4-m4-reboot-survival.md`.
+
+This runbook remains the recovery procedure for future reboots.
 
 ## Preconditions
 
