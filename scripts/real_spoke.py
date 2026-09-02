@@ -21,7 +21,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from hermes_hub.config import resolve_spoke_hub_url, resolve_spoke_name
-from hermes_hub.credentials import CredentialUnavailable, require_spoke_credential
+from hermes_hub.credentials import (
+    CredentialUnavailable,
+    require_join_credential,
+    require_spoke_credential,
+)
 from hermes_hub.sessions import SessionMap, SessionStore
 from hermes_hub.spoke_client import SpokeClient
 from hermes_hub.spoke_executor import SpokeExecutor
@@ -37,6 +41,16 @@ async def main(port: int, spoke_name: str) -> None:
 
     session_map = SessionMap(store=SessionStore())
     try:
+        # (M1, W4b) These are deliberately TWO distinct Keychain secrets:
+        # `join_credential` (hub:spoke:token) only answers "may this spoke
+        # register with the hub at all" and is shared across every managed
+        # spoke; `expected_credential` (spoke:<name>:credential) is this
+        # spoke's own V5a command-authorization secret, checked per-task
+        # against a caller's credential, and MUST differ per spoke. Sending
+        # the command credential as the WS registration token (the pre-M1
+        # bug) would strand every spoke but one as soon as their command
+        # credentials stopped being identical.
+        join_credential = require_join_credential()
         expected_credential = require_spoke_credential(spoke_name)
     except CredentialUnavailable as exc:
         logging.error("%s: managed-spoke startup refused: %s", spoke_name, exc)
@@ -58,9 +72,10 @@ async def main(port: int, spoke_name: str) -> None:
     client = SpokeClient(
         hub_url=resolve_spoke_hub_url(port),
         name=spoke_name,
-        # The managed hub requires the same Keychain-backed spoke credential
-        # at the WebSocket registration boundary; it stays in process memory.
-        token=expected_credential,
+        # (M1, W4b) The WS registration token is the shared join secret,
+        # NOT this spoke's per-command V5a credential -- see the comment
+        # above. It stays in process memory only.
+        token=join_credential,
         skills=[
             {
                 "id": "general-reasoning",

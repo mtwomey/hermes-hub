@@ -61,6 +61,31 @@ def require_hub_credentials() -> tuple[str, str]:
     return external, spoke
 
 
+def require_join_credential() -> str:
+    """Resolve the shared spoke-registration ("join") secret (M1, W4b).
+
+    Answers only V5's question (a) -- "may this spoke join the hub at
+    all" -- and is deliberately decoupled from any spoke's per-command
+    V5a credential (``spoke:<name>:credential``). Reads the SAME Keychain
+    account the hub already expects at registration
+    (``hub:spoke:token``, see :func:`require_hub_credentials`), so a
+    managed spoke's registration token and the hub's expected token stay
+    one shared secret -- while each spoke's command-authorization
+    credential remains independently distinct.
+
+    Fails closed like :func:`require_spoke_credential`: no environment
+    override (launchd plist EnvironmentVariables are world-readable),
+    Keychain only.
+    """
+    value = _read_keychain_account("hub:spoke:token")
+    if not value:
+        raise CredentialUnavailable(
+            f"managed spoke requires the Keychain join credential {KEYCHAIN_SERVICE!r} / "
+            "'hub:spoke:token'"
+        )
+    return value
+
+
 def _read_keychain(spoke_name: str) -> str:
     """Best-effort macOS Keychain read. Returns "" on any failure, missing
     binary, or non-macOS host -- never raises."""
@@ -109,6 +134,58 @@ def require_spoke_credential(spoke_name: str) -> str:
             f"{_keychain_account(spoke_name)!r}"
         )
     return keychain_value
+
+
+class CredentialTopologyError(RuntimeError):
+    """Raised by :func:`assert_distinct_credential_topology` when unrelated
+    credential groups share a value, or an intended-matching group's members
+    disagree (M1, Gate 1 — the assertion whose absence let every account on
+    Pumpkin and Olive collapse to one shared secret)."""
+
+
+def assert_distinct_credential_topology(
+    values: "dict[str, str]", groups: "dict[str, list[str]]"
+) -> None:
+    """Verify per-peer credential distinctness.
+
+    ``values`` maps an account label (any string identifying one Keychain
+    read, e.g. ``"spoke:Olive:credential"`` or ``"caller:Pumpkin:credential
+    (Olive)"`` when the same account name is read from two machines) to its
+    resolved secret. ``groups`` maps a group name to the list of account
+    labels that are supposed to hold ONE shared value (a caller/spoke PAIR,
+    or a token that must match across machines).
+
+    Raises :class:`CredentialTopologyError` if:
+
+    * any account in a group has an empty/missing value (never treated as
+      "matching" -- see the plan's ``e3b0c44298fc1c14`` note for why),
+    * a group's accounts do not all resolve to the same value, or
+    * two DIFFERENT groups resolve to the same value (unrelated accounts
+      sharing a secret -- the exact defect this function exists to catch).
+    """
+    group_values: "dict[str, str]" = {}
+    for group_name, accounts in groups.items():
+        resolved = {values.get(a, "") for a in accounts}
+        if "" in resolved:
+            missing = [a for a in accounts if not values.get(a, "")]
+            raise CredentialTopologyError(
+                f"group {group_name!r} has missing/empty value(s) for: {missing}"
+            )
+        if len(resolved) != 1:
+            raise CredentialTopologyError(
+                f"group {group_name!r} accounts do not all match: {accounts}"
+            )
+        group_values[group_name] = resolved.pop()
+
+    seen: "dict[str, str]" = {}
+    for group_name, value in group_values.items():
+        for other_name, other_value in seen.items():
+            if value == other_value:
+                raise CredentialTopologyError(
+                    f"unrelated groups {group_name!r} and {other_name!r} share "
+                    "the same credential value"
+                )
+        seen[group_name] = value
 
 
 def resolve_spoke_credential(spoke_name: str, *, explicit: str = "") -> str:
