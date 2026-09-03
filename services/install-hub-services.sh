@@ -184,10 +184,12 @@ show_status() {
     echo "Configuration: $HUB_CONFIG_FILE"
     echo "Requested hub endpoint: $HUB_HOST:$HUB_PORT ($HUB_PUBLIC_URL)"
     echo ""
+    local user_id
+    user_id=$(id -u)
     for label in "$HUB_LABEL" "$SPOKE_LABEL"; do
-        if launchctl list | grep -q "$label"; then
+        if launchctl print "gui/$user_id/$label" >/dev/null 2>&1; then
             echo -e "${GREEN}OK${NC} $label is registered"
-            launchctl list "$label" | grep -E "PID|LastExitStatus" || true
+            launchctl print "gui/$user_id/$label" | grep -E "pid =|last exit code" || true
         else
             echo -e "${RED}--${NC} $label is NOT registered"
         fi

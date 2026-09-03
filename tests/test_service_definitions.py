@@ -147,6 +147,30 @@ def test_config_file_supplies_persistent_lan_endpoint(tmp_path):
     )
 
 
+def test_status_queries_each_launchd_service_domain(tmp_path):
+    stub_dir = tmp_path / "binstub"
+    stub_dir.mkdir()
+    status_log = tmp_path / "launchctl.log"
+    stub = stub_dir / "launchctl"
+    stub.write_text(
+        "#!/bin/bash\n"
+        "printf '%s\\n' \"$*\" >> \"$STATUS_LOG\"\n"
+        "test \"$1\" = print\n"
+    )
+    stub.chmod(0o755)
+    env = _dry_run_env(tmp_path)
+    env["PATH"] = f"{stub_dir}:{os.environ['PATH']}"
+    env["STATUS_LOG"] = str(status_log)
+
+    result = _run_installer("status", env_overrides=env)
+
+    assert result.returncode == 0, result.stderr
+    calls = status_log.read_text()
+    assert "print gui/" in calls
+    assert "ai.hermes.hub" in calls
+    assert "ai.hermes.spoke" in calls
+
+
 def test_dry_run_mode_never_calls_launchctl(tmp_path):
     """Gate 1 must create/lint/remove only temp plists -- loading belongs to
     M3. A poison launchctl makes any accidental invocation fail this test."""
