@@ -270,7 +270,7 @@ def build_spoke_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     connect = sub.add_parser("connect", help="Connect to a hub as a spoke")
-    connect.add_argument("--hub", required=True, help="Hub base URL, e.g. ws://hub.example.invalid:8770")
+    connect.add_argument("--hub", required=True, help="Hub base URL, e.g. wss://hub.example.invalid:8770")
     connect.add_argument("--name", required=True, help="This spoke's name")
     connect.add_argument("--token", default="", help="Bearer token to present at connect time")
     connect.add_argument(
