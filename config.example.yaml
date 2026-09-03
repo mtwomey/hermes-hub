@@ -12,6 +12,10 @@ hub:
   host: 0.0.0.0
   port: 8770
 
+  # The routable URL clients use. This must be set explicitly whenever host
+  # binds all interfaces; use a stable DNS name or deployment-specific IP.
+  public_url: "https://hub.example.invalid:8770"
+
   # Bearer token spokes must present at WebSocket connect time (H8).
   # Store the real value in the OS keychain / a secret manager, not here.
   # Empty string means "dev mode" (no auth enforced) -- do not use this in
@@ -46,10 +50,10 @@ spokes:
 #
 #   hermes-hub serve --host 0.0.0.0 --port 8770 --token <external_token>
 #
-#   hermes-hub-spoke connect --hub http://192.0.2.236:8770 \
+#   hermes-hub-spoke connect --hub https://hub.example.invalid:8770 \
 #     --name Pumpkin --token <spoke_token> \
 #     --skill general-reasoning:"General reasoning" \
 #     --skill filesystem-search:"Local filesystem search"
 #
-#   hermes-hub ask Pumpkin "What is 9+16?" --hub-url http://192.0.2.236:8770 \
+#   hermes-hub ask Pumpkin "What is 9+16?" --hub-url https://hub.example.invalid:8770 \
 #     --token <external_token>

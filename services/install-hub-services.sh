@@ -23,7 +23,18 @@ HUB_VENV="${HUB_VENV:-$REPO_DIR/.venv}"
 HERMES_AGENT_VENV="${HERMES_AGENT_VENV:-$HOMES_DIR/hermes-agent/venv}"
 HUB_HOST="${HUB_HOST:-127.0.0.1}"
 HUB_PORT="${HUB_PORT:-8770}"
-HUB_PUBLIC_URL="${HUB_PUBLIC_URL:-http://${HUB_HOST}:${HUB_PORT}}"
+# A wildcard bind address is not a routable endpoint. Operators exposing the
+# hub beyond loopback must explicitly provide its stable, reachable base URL.
+HUB_PUBLIC_URL="${HUB_PUBLIC_URL:-}"
+if [ -z "$HUB_PUBLIC_URL" ]; then
+    case "$HUB_HOST" in
+        0.0.0.0|::)
+            echo "HUB_PUBLIC_URL is required when HUB_HOST binds all interfaces" >&2
+            exit 2
+            ;;
+        *) HUB_PUBLIC_URL="http://${HUB_HOST}:${HUB_PORT}" ;;
+    esac
+fi
 HUB_TASK_TIMEOUT_SECONDS="${HUB_TASK_TIMEOUT_SECONDS:-300}"
 SPOKE_NAME="${SPOKE_NAME:-Pumpkin}"
 LAUNCH_AGENTS_DIR="${LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"

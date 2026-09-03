@@ -113,6 +113,15 @@ def test_dry_run_install_generates_valid_plists(tmp_path):
     assert "CREDENTIAL" not in blob.upper() or "SPOKE_CREDENTIAL" not in blob.upper()
 
 
+def test_wildcard_hub_bind_requires_explicit_public_url(tmp_path):
+    env = _dry_run_env(tmp_path)
+    env["HUB_HOST"] = "0.0.0.0"
+    result = _run_installer("install", env_overrides=env)
+
+    assert result.returncode == 2
+    assert "HUB_PUBLIC_URL is required" in result.stderr
+
+
 def test_dry_run_mode_never_calls_launchctl(tmp_path):
     """Gate 1 must create/lint/remove only temp plists -- loading belongs to
     M3. A poison launchctl makes any accidental invocation fail this test."""
