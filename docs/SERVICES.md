@@ -9,6 +9,22 @@ V10 M1–M3 installs two user LaunchAgents on Pumpkin:
 
 The installer is `services/install-hub-services.sh`. It owns only these two labels. It must never target `ai.hermes.gateway`.
 
+## Endpoint configuration
+
+The default deployment binds the hub to `127.0.0.1:8770`. To expose it on
+all local interfaces, set both a wildcard bind address and the distinct,
+routable URL that spokes should use; the installer rejects a wildcard bind
+without this explicit URL:
+
+```bash
+HUB_HOST=0.0.0.0 \
+HUB_PUBLIC_URL=https://hub.example.invalid:8770 \
+services/install-hub-services.sh reinstall
+```
+
+`HUB_PUBLIC_URL` is deployment configuration, not a credential. Keep bearer
+tokens in the Keychain; do not place them in the plist or this command.
+
 ## M4: verified after reboot
 
 **M4 passed on 2026-09-01.** After Matthew rebooted Pumpkin, both user LaunchAgents started without terminal intervention, the hub listened on `127.0.0.1:8770`, `/health` listed `Pumpkin`, and the installed `peer_list` model tool returned Pumpkin. Evidence: `.hermes/evidence/v10-m4-cold-boot.md`.
