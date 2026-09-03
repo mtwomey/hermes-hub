@@ -7,7 +7,7 @@ V10 M1–M3 installs two user LaunchAgents on Pumpkin:
 | `ai.hermes.hub` | Hub listener on `127.0.0.1:8770` | `/Users/mtwomey/Git_Repos/hermes-hub/.venv` |
 | `ai.hermes.spoke` | Pumpkin's outbound local Hermes spoke | existing `~/.hermes/hermes-agent/venv` — **no package is installed by this service** |
 
-The installer is `services/install-hub-services.sh`. It owns only these two labels. It must never target `ai.hermes.gateway`.
+The installer is `services/install-hub-services.sh`. It owns only these two labels. It must never target `ai.hermes.gateway`. `SERVICE_MODE` (`hub`, `spoke`, or `both`) selects which of the two are managed by any given `install`/`uninstall`/`status`/`reinstall` invocation.
 
 For a complete hub-only, spoke-only, or combined-host setup, use
 [`DEPLOYMENT.md`](DEPLOYMENT.md).

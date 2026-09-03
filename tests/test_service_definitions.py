@@ -149,6 +149,19 @@ def test_hub_mode_generates_only_hub_service(tmp_path):
     assert hub_data["EnvironmentVariables"]["HERMES_HUB_HOST"] == "0.0.0.0"
 
 
+def test_spoke_only_mode_does_not_require_hub_venv(tmp_path):
+    _install_stub_launchctl(tmp_path)
+    env = _dry_run_env(tmp_path)
+    env["SERVICE_MODE"] = "spoke"
+    env["SPOKE_HUB_HOST"] = "hub.example.invalid"
+    env["HUB_VENV"] = str(tmp_path / "no-such-hub-venv")
+
+    result = _run_installer("install", env_overrides=env)
+
+    assert result.returncode == 0, result.stderr
+    assert (Path(env["LAUNCH_AGENTS_DIR"]) / "ai.hermes.spoke.plist").exists()
+
+
 def test_wildcard_hub_bind_requires_explicit_public_url(tmp_path):
     env = _dry_run_env(tmp_path)
     env["HUB_HOST"] = "0.0.0.0"
@@ -179,6 +192,20 @@ def test_config_file_supplies_persistent_lan_endpoint(tmp_path):
         hub_data["EnvironmentVariables"]["HERMES_HUB_PUBLIC_URL"]
         == "https://hub.example.invalid:8770"
     )
+
+
+def test_status_reports_selected_mode_and_endpoints_without_crashing(tmp_path):
+    _install_stub_launchctl(tmp_path)
+    env = _dry_run_env(tmp_path)
+    env.pop("HUB_HOST")
+    env["SERVICE_MODE"] = "spoke"
+    env["SPOKE_HUB_HOST"] = "hub.example.invalid"
+
+    result = _run_installer("status", env_overrides=env)
+
+    assert result.returncode == 0, result.stderr
+    assert "unbound variable" not in result.stderr
+    assert "hub.example.invalid" in result.stdout
 
 
 def test_status_queries_each_launchd_service_domain(tmp_path):

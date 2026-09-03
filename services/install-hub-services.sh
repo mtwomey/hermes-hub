@@ -85,17 +85,21 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 check_dependencies() {
     log_info "Checking dependencies..."
 
-    if [ ! -d "$HUB_VENV" ]; then
+    if { [ "$SERVICE_MODE" = hub ] || [ "$SERVICE_MODE" = both ]; } && [ ! -d "$HUB_VENV" ]; then
         log_error "Hub venv not found at $HUB_VENV (run: python3 -m venv .venv && .venv/bin/pip install -e '.[dev]')"
         exit 1
     fi
 
-    if [ ! -x "$HUB_WRAPPER" ] || [ ! -x "$SPOKE_WRAPPER" ]; then
-        log_error "Wrapper scripts must be executable: $HUB_WRAPPER, $SPOKE_WRAPPER"
+    if { [ "$SERVICE_MODE" = hub ] || [ "$SERVICE_MODE" = both ]; } && [ ! -x "$HUB_WRAPPER" ]; then
+        log_error "Hub wrapper must be executable: $HUB_WRAPPER"
+        exit 1
+    fi
+    if { [ "$SERVICE_MODE" = spoke ] || [ "$SERVICE_MODE" = both ]; } && [ ! -x "$SPOKE_WRAPPER" ]; then
+        log_error "Spoke wrapper must be executable: $SPOKE_WRAPPER"
         exit 1
     fi
 
-    if [ ! -d "$HERMES_AGENT_VENV" ]; then
+    if { [ "$SERVICE_MODE" = spoke ] || [ "$SERVICE_MODE" = both ]; } && [ ! -d "$HERMES_AGENT_VENV" ]; then
         log_warn "Hermes runtime venv not found at $HERMES_AGENT_VENV -- the spoke service will fail loudly at start rather than install anything into it."
     fi
 
@@ -178,15 +182,20 @@ uninstall_services() {
     USER_ID=$(id -u)
 
     if [ "${DRY_RUN:-0}" != "1" ]; then
-        [ -f "$HUB_PLIST" ] && launchctl bootout "gui/$USER_ID" "$HUB_PLIST" 2>/dev/null || true
-        [ -f "$SPOKE_PLIST" ] && launchctl bootout "gui/$USER_ID" "$SPOKE_PLIST" 2>/dev/null || true
-        launchctl bootout "gui/$USER_ID/$HUB_LABEL" 2>/dev/null || true
-        launchctl bootout "gui/$USER_ID/$SPOKE_LABEL" 2>/dev/null || true
+        if [ "$SERVICE_MODE" = hub ] || [ "$SERVICE_MODE" = both ]; then
+            [ -f "$HUB_PLIST" ] && launchctl bootout "gui/$USER_ID" "$HUB_PLIST" 2>/dev/null || true
+            launchctl bootout "gui/$USER_ID/$HUB_LABEL" 2>/dev/null || true
+            rm -f "$HUB_PLIST"
+        fi
+        if [ "$SERVICE_MODE" = spoke ] || [ "$SERVICE_MODE" = both ]; then
+            [ -f "$SPOKE_PLIST" ] && launchctl bootout "gui/$USER_ID" "$SPOKE_PLIST" 2>/dev/null || true
+            launchctl bootout "gui/$USER_ID/$SPOKE_LABEL" 2>/dev/null || true
+            rm -f "$SPOKE_PLIST"
+        fi
     else
         log_info "DRY RUN: launchctl was not called"
     fi
 
-    rm -f "$HUB_PLIST" "$SPOKE_PLIST"
     log_info "Services uninstalled"
 }
 
@@ -194,11 +203,19 @@ show_status() {
     echo ""
     echo "=== V10 hub/spoke service status ==="
     echo "Configuration: $HUB_CONFIG_FILE"
-    echo "Requested hub endpoint: $HUB_HOST:$HUB_PORT ($HUB_PUBLIC_URL)"
+    echo "Service mode: $SERVICE_MODE"
+    if [ "$SERVICE_MODE" = hub ] || [ "$SERVICE_MODE" = both ]; then
+        echo "Hub endpoint: $HUB_BIND_HOST:$HUB_PORT ($HUB_PUBLIC_URL)"
+    fi
+    if [ "$SERVICE_MODE" = spoke ] || [ "$SERVICE_MODE" = both ]; then
+        echo "Spoke '$SPOKE_NAME' hub target: $SPOKE_HUB_HOST:$HUB_PORT"
+    fi
     echo ""
     local user_id
     user_id=$(id -u)
     for label in "$HUB_LABEL" "$SPOKE_LABEL"; do
+        [ "$label" = "$HUB_LABEL" ] && [ "$SERVICE_MODE" = spoke ] && continue
+        [ "$label" = "$SPOKE_LABEL" ] && [ "$SERVICE_MODE" = hub ] && continue
         if launchctl print "gui/$user_id/$label" >/dev/null 2>&1; then
             echo -e "${GREEN}OK${NC} $label is registered"
             launchctl print "gui/$user_id/$label" | grep -E "pid =|last exit code" || true
@@ -207,10 +224,12 @@ show_status() {
         fi
     done
     echo ""
-    if lsof -nP -iTCP:"$HUB_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-        echo -e "${GREEN}OK${NC} hub port $HUB_PORT is listening"
-    else
-        echo -e "${RED}--${NC} hub port $HUB_PORT is NOT listening"
+    if [ "$SERVICE_MODE" = hub ] || [ "$SERVICE_MODE" = both ]; then
+        if lsof -nP -iTCP:"$HUB_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+            echo -e "${GREEN}OK${NC} hub port $HUB_PORT is listening"
+        else
+            echo -e "${RED}--${NC} hub port $HUB_PORT is NOT listening"
+        fi
     fi
     echo ""
 }
@@ -218,18 +237,21 @@ show_status() {
 show_help() {
     echo "Usage: $0 {install|uninstall|status|reinstall}"
     echo ""
-    echo "  install    - Generate plists and load ai.hermes.hub + ai.hermes.spoke"
-    echo "  uninstall  - Unload both services and remove their plists"
-    echo "  status     - Show registration, PID, and hub port status"
+    echo "  install    - Generate plists and load the services selected by SERVICE_MODE"
+    echo "  uninstall  - Unload the services selected by SERVICE_MODE and remove their plists"
+    echo "  status     - Show registration, PID, and hub port status for the selected mode"
     echo "  reinstall  - uninstall then install"
+    echo ""
+    echo "SERVICE_MODE selects which labels are managed: hub, spoke, or both (default)."
     echo ""
     echo "Loads non-secret deployment values from $HUB_CONFIG_FILE when present."
     echo "Copy services/hub-service.env.example to that path and set HUB_PUBLIC_URL"
-    echo "before using HUB_HOST=0.0.0.0. Environment variables override that file."
+    echo "before using HUB_BIND_HOST=0.0.0.0. Environment variables override that file."
+    echo "See docs/DEPLOYMENT.md for hub-only, spoke-only, and combined setup guides."
     echo ""
     echo "Never touches ai.hermes.gateway. Env overrides: HOMES_DIR, LOG_DIR,"
-    echo "HUB_VENV, HERMES_AGENT_VENV, HUB_HOST, HUB_PORT, HUB_PUBLIC_URL,"
-    echo "HUB_TASK_TIMEOUT_SECONDS, SPOKE_NAME, LAUNCH_AGENTS_DIR."
+    echo "HUB_VENV, HERMES_AGENT_VENV, SERVICE_MODE, HUB_BIND_HOST, SPOKE_HUB_HOST,"
+    echo "HUB_PORT, HUB_PUBLIC_URL, HUB_TASK_TIMEOUT_SECONDS, SPOKE_NAME, LAUNCH_AGENTS_DIR."
 }
 
 case "${1:-status}" in
