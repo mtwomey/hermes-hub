@@ -20,7 +20,7 @@
         <key>HERMES_HUB_REPO</key>
         <string>__REPO_DIR__</string>
         <key>HERMES_HUB_HOST</key>
-        <string>__HUB_HOST__</string>
+        <string>__HUB_BIND_HOST__</string>
         <key>HERMES_HUB_PORT</key>
         <string>__HUB_PORT__</string>
         <key>HERMES_HUB_PUBLIC_URL</key>

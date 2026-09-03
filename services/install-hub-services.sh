@@ -26,7 +26,7 @@ if [ -f "$HUB_CONFIG_FILE" ]; then
     while IFS='=' read -r key value || [ -n "$key" ]; do
         case "$key" in
             ""|\#*) continue ;;
-            HUB_HOST|HUB_PORT|HUB_PUBLIC_URL|HUB_TASK_TIMEOUT_SECONDS|SPOKE_NAME)
+            SERVICE_MODE|HUB_BIND_HOST|SPOKE_HUB_HOST|HUB_HOST|HUB_PORT|HUB_PUBLIC_URL|HUB_TASK_TIMEOUT_SECONDS|SPOKE_NAME)
                 printf -v "CONFIG_${key}" '%s' "$value"
                 ;;
             *)
@@ -41,22 +41,25 @@ HOMES_DIR="${HOMES_DIR:-$HOME/.hermes}"
 LOG_DIR="${LOG_DIR:-$HOMES_DIR/logs}"
 HUB_VENV="${HUB_VENV:-$REPO_DIR/.venv}"
 HERMES_AGENT_VENV="${HERMES_AGENT_VENV:-$HOMES_DIR/hermes-agent/venv}"
-HUB_HOST="${HUB_HOST:-${CONFIG_HUB_HOST:-127.0.0.1}}"
+HUB_BIND_HOST="${HUB_BIND_HOST:-${CONFIG_HUB_BIND_HOST:-${HUB_HOST:-${CONFIG_HUB_HOST:-127.0.0.1}}}}"
+SPOKE_HUB_HOST="${SPOKE_HUB_HOST:-${CONFIG_SPOKE_HUB_HOST:-127.0.0.1}}"
 HUB_PORT="${HUB_PORT:-${CONFIG_HUB_PORT:-8770}}"
 # A wildcard bind address is not a routable endpoint. Operators exposing the
 # hub beyond loopback must explicitly provide its stable, reachable base URL.
 HUB_PUBLIC_URL="${HUB_PUBLIC_URL:-${CONFIG_HUB_PUBLIC_URL:-}}"
 if [ -z "$HUB_PUBLIC_URL" ]; then
-    case "$HUB_HOST" in
+    case "$HUB_BIND_HOST" in
         0.0.0.0|::)
             echo "HUB_PUBLIC_URL is required when HUB_HOST binds all interfaces" >&2
             exit 2
             ;;
-        *) HUB_PUBLIC_URL="http://${HUB_HOST}:${HUB_PORT}" ;;
+        *) HUB_PUBLIC_URL="http://${HUB_BIND_HOST}:${HUB_PORT}" ;;
     esac
 fi
 HUB_TASK_TIMEOUT_SECONDS="${HUB_TASK_TIMEOUT_SECONDS:-${CONFIG_HUB_TASK_TIMEOUT_SECONDS:-300}}"
 SPOKE_NAME="${SPOKE_NAME:-${CONFIG_SPOKE_NAME:-Pumpkin}}"
+SERVICE_MODE="${SERVICE_MODE:-${CONFIG_SERVICE_MODE:-both}}"
+case "$SERVICE_MODE" in hub|spoke|both) ;; *) echo "SERVICE_MODE must be hub, spoke, or both" >&2; exit 2 ;; esac
 LAUNCH_AGENTS_DIR="${LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
 
 HUB_LABEL="ai.hermes.hub"
@@ -106,7 +109,8 @@ render_template() {
         -e "s#__REPO_DIR__#$REPO_DIR#g" \
         -e "s#__HUB_VENV__#$HUB_VENV#g" \
         -e "s#__HERMES_VENV__#$HERMES_AGENT_VENV#g" \
-        -e "s#__HUB_HOST__#$HUB_HOST#g" \
+        -e "s#__HUB_BIND_HOST__#$HUB_BIND_HOST#g" \
+        -e "s#__SPOKE_HUB_HOST__#$SPOKE_HUB_HOST#g" \
         -e "s#__HUB_PORT__#$HUB_PORT#g" \
         -e "s#__HUB_PUBLIC_URL__#$HUB_PUBLIC_URL#g" \
         -e "s#__HUB_TASK_TIMEOUT_SECONDS__#$HUB_TASK_TIMEOUT_SECONDS#g" \
@@ -123,12 +127,16 @@ create_plists() {
     tmp_hub="$(mktemp)"
     tmp_spoke="$(mktemp)"
 
-    sed -e "s#__LABEL__#$HUB_LABEL#g" -e "s#__WRAPPER__#$HUB_WRAPPER#g" "$HUB_TEMPLATE" > "$tmp_hub"
-    render_template "$tmp_hub" "$HUB_PLIST"
+    if [ "$SERVICE_MODE" = hub ] || [ "$SERVICE_MODE" = both ]; then
+        sed -e "s#__LABEL__#$HUB_LABEL#g" -e "s#__WRAPPER__#$HUB_WRAPPER#g" "$HUB_TEMPLATE" > "$tmp_hub"
+        render_template "$tmp_hub" "$HUB_PLIST"
+    fi
     rm -f "$tmp_hub"
 
-    sed -e "s#__LABEL__#$SPOKE_LABEL#g" -e "s#__WRAPPER__#$SPOKE_WRAPPER#g" "$SPOKE_TEMPLATE" > "$tmp_spoke"
-    render_template "$tmp_spoke" "$SPOKE_PLIST"
+    if [ "$SERVICE_MODE" = spoke ] || [ "$SERVICE_MODE" = both ]; then
+        sed -e "s#__LABEL__#$SPOKE_LABEL#g" -e "s#__WRAPPER__#$SPOKE_WRAPPER#g" "$SPOKE_TEMPLATE" > "$tmp_spoke"
+        render_template "$tmp_spoke" "$SPOKE_PLIST"
+    fi
     rm -f "$tmp_spoke"
 
     log_info "Plists written: $HUB_PLIST, $SPOKE_PLIST"
@@ -143,22 +151,26 @@ install_services() {
     log_info "Loading services into launchd..."
     USER_ID=$(id -u)
 
-    launchctl enable "gui/$USER_ID/$HUB_LABEL" 2>/dev/null || true
-    if ! launchctl bootstrap "gui/$USER_ID" "$HUB_PLIST"; then
-        log_error "launchctl failed to load $HUB_LABEL"
-        exit 1
+    if [ "$SERVICE_MODE" = hub ] || [ "$SERVICE_MODE" = both ]; then
+        launchctl enable "gui/$USER_ID/$HUB_LABEL" 2>/dev/null || true
+        if ! launchctl bootstrap "gui/$USER_ID" "$HUB_PLIST"; then
+            log_error "launchctl failed to load $HUB_LABEL"
+            exit 1
+        fi
+        log_info "$HUB_LABEL loaded"
     fi
-    log_info "$HUB_LABEL loaded"
 
-    launchctl enable "gui/$USER_ID/$SPOKE_LABEL" 2>/dev/null || true
-    if ! launchctl bootstrap "gui/$USER_ID" "$SPOKE_PLIST"; then
-        log_error "launchctl failed to load $SPOKE_LABEL"
-        # Do not leave a partial managed deployment when spoke bootstrap
-        # fails. This only targets the new hub label, never the gateway.
-        launchctl bootout "gui/$USER_ID/$HUB_LABEL" 2>/dev/null || true
-        exit 1
+    if [ "$SERVICE_MODE" = spoke ] || [ "$SERVICE_MODE" = both ]; then
+        launchctl enable "gui/$USER_ID/$SPOKE_LABEL" 2>/dev/null || true
+        if ! launchctl bootstrap "gui/$USER_ID" "$SPOKE_PLIST"; then
+            log_error "launchctl failed to load $SPOKE_LABEL"
+            if [ "$SERVICE_MODE" = both ]; then
+                launchctl bootout "gui/$USER_ID/$HUB_LABEL" 2>/dev/null || true
+            fi
+            exit 1
+        fi
+        log_info "$SPOKE_LABEL loaded"
     fi
-    log_info "$SPOKE_LABEL loaded"
 }
 
 uninstall_services() {

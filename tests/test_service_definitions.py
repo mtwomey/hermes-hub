@@ -115,6 +115,40 @@ def test_dry_run_install_generates_valid_plists(tmp_path):
     assert "CREDENTIAL" not in blob.upper() or "SPOKE_CREDENTIAL" not in blob.upper()
 
 
+def test_spoke_mode_generates_only_spoke_service(tmp_path):
+    _install_stub_launchctl(tmp_path)
+    env = _dry_run_env(tmp_path)
+    env["SERVICE_MODE"] = "spoke"
+    env["SPOKE_HUB_HOST"] = "hub.example.invalid"
+
+    result = _run_installer("install", env_overrides=env)
+
+    assert result.returncode == 0, result.stderr
+    launch_agents = Path(env["LAUNCH_AGENTS_DIR"])
+    assert not (launch_agents / "ai.hermes.hub.plist").exists()
+    spoke_plist = launch_agents / "ai.hermes.spoke.plist"
+    spoke_data = plistlib.loads(spoke_plist.read_bytes())
+    assert spoke_data["EnvironmentVariables"]["HERMES_HUB_HOST"] == "hub.example.invalid"
+
+
+def test_hub_mode_generates_only_hub_service(tmp_path):
+    _install_stub_launchctl(tmp_path)
+    env = _dry_run_env(tmp_path)
+    env["SERVICE_MODE"] = "hub"
+    env["HUB_BIND_HOST"] = "0.0.0.0"
+    env["HUB_PUBLIC_URL"] = "https://hub.example.invalid:8770"
+
+    result = _run_installer("install", env_overrides=env)
+
+    assert result.returncode == 0, result.stderr
+    launch_agents = Path(env["LAUNCH_AGENTS_DIR"])
+    hub_plist = launch_agents / "ai.hermes.hub.plist"
+    assert hub_plist.exists()
+    assert not (launch_agents / "ai.hermes.spoke.plist").exists()
+    hub_data = plistlib.loads(hub_plist.read_bytes())
+    assert hub_data["EnvironmentVariables"]["HERMES_HUB_HOST"] == "0.0.0.0"
+
+
 def test_wildcard_hub_bind_requires_explicit_public_url(tmp_path):
     env = _dry_run_env(tmp_path)
     env["HUB_HOST"] = "0.0.0.0"

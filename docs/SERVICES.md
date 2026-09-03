@@ -9,6 +9,9 @@ V10 M1–M3 installs two user LaunchAgents on Pumpkin:
 
 The installer is `services/install-hub-services.sh`. It owns only these two labels. It must never target `ai.hermes.gateway`.
 
+For a complete hub-only, spoke-only, or combined-host setup, use
+[`DEPLOYMENT.md`](DEPLOYMENT.md).
+
 ## Local deployment configuration
 
 The portable default is loopback. A hub host that accepts LAN spokes keeps its
