@@ -48,6 +48,8 @@ def _dry_run_env(tmp_path: Path) -> dict:
         "HUB_VENV": str(hub_venv),
         "HERMES_AGENT_VENV": str(hermes_venv),
         "LAUNCH_AGENTS_DIR": str(launch_agents),
+        # Isolate fixture execution from any real deployment configuration.
+        "HUB_CONFIG_FILE": str(tmp_path / "missing-hub-service.env"),
         "HUB_HOST": "127.0.0.1",
         "HUB_PORT": "8770",
         "SPOKE_NAME": "Pumpkin",
@@ -120,6 +122,29 @@ def test_wildcard_hub_bind_requires_explicit_public_url(tmp_path):
 
     assert result.returncode == 2
     assert "HUB_PUBLIC_URL is required" in result.stderr
+
+
+def test_config_file_supplies_persistent_lan_endpoint(tmp_path):
+    _install_stub_launchctl(tmp_path)
+    config_file = tmp_path / "hub-service.env"
+    config_file.write_text(
+        "HUB_HOST=0.0.0.0\n"
+        "HUB_PUBLIC_URL=https://hub.example.invalid:8770\n"
+    )
+    env = _dry_run_env(tmp_path)
+    env.pop("HUB_HOST")
+    env["HUB_CONFIG_FILE"] = str(config_file)
+
+    result = _run_installer("install", env_overrides=env)
+
+    assert result.returncode == 0, result.stderr
+    hub_plist = Path(env["LAUNCH_AGENTS_DIR"]) / "ai.hermes.hub.plist"
+    hub_data = plistlib.loads(hub_plist.read_bytes())
+    assert hub_data["EnvironmentVariables"]["HERMES_HUB_HOST"] == "0.0.0.0"
+    assert (
+        hub_data["EnvironmentVariables"]["HERMES_HUB_PUBLIC_URL"]
+        == "https://hub.example.invalid:8770"
+    )
 
 
 def test_dry_run_mode_never_calls_launchctl(tmp_path):

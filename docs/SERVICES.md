@@ -9,21 +9,23 @@ V10 M1–M3 installs two user LaunchAgents on Pumpkin:
 
 The installer is `services/install-hub-services.sh`. It owns only these two labels. It must never target `ai.hermes.gateway`.
 
-## Endpoint configuration
+## Local deployment configuration
 
-The default deployment binds the hub to `127.0.0.1:8770`. To expose it on
-all local interfaces, set both a wildcard bind address and the distinct,
-routable URL that spokes should use; the installer rejects a wildcard bind
-without this explicit URL:
+The portable default is loopback. A hub host that accepts LAN spokes keeps its
+non-secret endpoint settings in `~/.config/hermes-hub/service.env`, created by
+copying `services/hub-service.env.example` and setting the reachable public
+URL. Every `install`, `reinstall`, and `status` invocation reads this file;
+environment variables remain one-command overrides.
 
 ```bash
-HUB_HOST=0.0.0.0 \
-HUB_PUBLIC_URL=https://hub.example.invalid:8770 \
+cp services/hub-service.env.example ~/.config/hermes-hub/service.env
+# Edit HUB_PUBLIC_URL for this deployment, then:
 services/install-hub-services.sh reinstall
 ```
 
-`HUB_PUBLIC_URL` is deployment configuration, not a credential. Keep bearer
-tokens in the Keychain; do not place them in the plist or this command.
+With `HUB_HOST=0.0.0.0`, the installer rejects a missing `HUB_PUBLIC_URL`;
+it never silently regenerates a loopback-only plist. Credentials remain in the
+Keychain and do not belong in this file.
 
 ## M4: verified after reboot
 
