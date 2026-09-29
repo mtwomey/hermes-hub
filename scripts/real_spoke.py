@@ -3,18 +3,43 @@ each routed task frame runs a REAL Hermes agent turn via
 ``spoke_executor.run_real_hermes_turn`` (M4), with session continuity via
 ``SessionMap`` (M5).
 
-Must run under the LIVE Hermes runtime's venv (``run_agent``/``hermes_state``
+Must run under the LIVE Hermes runtime (``run_agent``/``hermes_state``
 importable), not this repo's own .venv -- hence the sys.path wiring below
-points at both this repo (for hermes_hub) and relies on being invoked with
-the Hermes runtime's python interpreter.
+points at both this repo (for hermes_hub) and the Hermes agent root.
+
+Hermes activates its dependencies at runtime rather than keeping them on the
+interpreter that starts us: ``hermes_bootstrap`` re-execs this process onto
+its managed "store" interpreter with ``-I`` (isolated, so PYTHONPATH and the
+starting venv's site-packages are both ignored), then puts the currently
+selected dependency generation on ``sys.path``. Transport deps such as
+``websockets`` therefore do NOT exist until that import has run, so it must
+come BEFORE anything that pulls them in -- importing ``hermes_hub.spoke_client``
+first crash-loops the service with ``ModuleNotFoundError: websockets`` on every
+inbound task (the import sits at that module's top level, so startup and hub
+registration still succeed and only real work fails).
+
+Do not pin this service to a specific venv or dependency generation to dodge
+that: Hermes rebuilds generations on update, and a pinned path silently rots
+into exactly this failure.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
+
+# Hermes's dependency activation, before any import that needs those deps.
+# Override with HERMES_AGENT_ROOT if the agent lives outside ~/.hermes.
+_agent_root = os.environ.get("HERMES_AGENT_ROOT") or str(
+    Path.home() / ".hermes" / "hermes-agent"
+)
+if _agent_root not in sys.path:
+    sys.path.insert(0, _agent_root)
+
+import hermes_bootstrap  # noqa: F401,E402  -- side effect: activates Hermes deps
 
 # This script is executed from each machine's own checkout. Never hardcode
 # Pumpkin's home directory: remote spokes must import their local copy.
