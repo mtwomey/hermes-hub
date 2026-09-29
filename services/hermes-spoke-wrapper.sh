@@ -28,11 +28,27 @@ if [ ! -x "$SPOKE_PYTHON" ]; then
     exit 1
 fi
 
-if ! "$SPOKE_PYTHON" -c "import a2a, websockets, uvicorn" >/dev/null 2>&1; then
-    echo "hermes-spoke-wrapper: the Hermes runtime venv at $HERMES_AGENT_VENV is missing" >&2
-    echo "a2a-sdk / websockets / uvicorn. Refusing to start: nothing may be pip" >&2
-    echo "installed into that venv by this service. Install the transport deps" >&2
-    echo "the same way hermes-peer did, then retry." >&2
+# Check the deps the way the spoke actually gets them: after Hermes has
+# activated its managed dependency generation. Testing bare importability on
+# $SPOKE_PYTHON is wrong twice over -- hermes_bootstrap re-execs onto Hermes's
+# own store interpreter with -I (dropping this venv's site-packages), and the
+# deps do not exist on that interpreter until activation runs. A bare check
+# both passes when the real path would fail and fails when it would work.
+#
+# Only websockets is required here: a2a-sdk is imported by the HUB modules
+# (hub_server / hub_executor / agent_card), never by the spoke.
+if ! "$SPOKE_PYTHON" -c "
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ.get('HERMES_AGENT_ROOT') or str(Path.home() / '.hermes' / 'hermes-agent'))
+import hermes_bootstrap  # activates the selected dependency generation
+import websockets
+" >/dev/null 2>&1; then
+    echo "hermes-spoke-wrapper: websockets is not importable from the live Hermes" >&2
+    echo "runtime (after hermes_bootstrap activation). Refusing to start: nothing" >&2
+    echo "may be pip installed into the Hermes environment by this service." >&2
+    echo "Check that Hermes itself runs ('hermes --version') and that its managed" >&2
+    echo "dependency generation is current, then retry." >&2
     exit 1
 fi
 
