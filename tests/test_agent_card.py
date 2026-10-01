@@ -145,6 +145,31 @@ def test_card_latency_reflects_configured_task_timeout():
     assert "123.0" not in params["latency"]
 
 
+def test_card_declares_required_headers_including_a2a_version():
+    params = _routing_ext(agent_card_json(build_hub_agent_card(SpokeRegistry())))["params"]
+    assert params["requiredHeaders"] == {
+        "Authorization": "Bearer <hub token>",
+        "A2A-Version": "1.0",
+        "Content-Type": "application/json",
+    }
+    assert "A2A-Version: 1.0" in agent_card_json(build_hub_agent_card(SpokeRegistry()))["description"]
+
+
+def test_card_documents_errors_and_local_url():
+    params = _routing_ext(
+        agent_card_json(build_hub_agent_card(SpokeRegistry(), base_url="http://10.0.0.5:8770"))
+    )["params"]
+    assert "401" in params["errors"] and "-32009" in params["errors"] and "error" in params["errors"]
+    assert params["localRpcUrl"] == "http://127.0.0.1:8770/a2a/v1"
+
+
+def test_spoke_credential_guidance_is_unambiguous():
+    meta = _routing_ext(agent_card_json(build_hub_agent_card(SpokeRegistry())))["params"]["messageMetadata"]
+    cred = meta[cc.META_SPOKE_CREDENTIAL]
+    assert cred["required"] is False  # the hub does not require it
+    assert "Keychain item exists" in cred["sendWhen"]
+
+
 def test_card_rpc_url_matches_base_url():
     dumped = agent_card_json(build_hub_agent_card(SpokeRegistry(), base_url="http://10.0.0.5:8770"))
     assert dumped["supportedInterfaces"][0]["url"] == "http://10.0.0.5:8770/a2a/v1"

@@ -24,6 +24,9 @@ Paste this into the other agent's instructions:
 |---|---|
 | `description` | Prose: method, URL, the `targetSpoke` / `spokeCredential` metadata keys, where the credentials live |
 | `capabilities.extensions[uri=urn:hermes-hub:ext:spoke-routing:v1]` (required) | Structured contract: `connectedSpokes`, `rpcUrl`, `messageMetadata`, `credentials` (Keychain locations and commands, env fallbacks), `methods`, `artifacts`, `files`, `latency`, `exampleRequest` |
+| ↳ `requiredHeaders` | `Authorization: Bearer <hub token>`, `A2A-Version: 1.0`, `Content-Type: application/json`. Without `A2A-Version` the hub returns JSON-RPC error -32009 |
+| ↳ `localRpcUrl` / `urlNote` | `rpcUrl` is the advertised LAN address; on this Mac the loopback `localRpcUrl` hits the same endpoint |
+| ↳ `errors` | HTTP 401 vs JSON-RPC `error` vs `TASK_STATE_FAILED` |
 | `securitySchemes.bearerAuth` | Where the hub token is kept |
 | `skills[].description` | Which spoke owns the skill and how to address it |
 
