@@ -7,3 +7,7 @@ IT-managed/firewalled machines can participate in the peer network without
 any inbound firewall exception. See
 `.hermes/plans/2026-09-01_000000-websocket-hub-spoke-protocol.md` for the
 full design and decision record.
+
+Non-Hermes agents on the hub's Mac can call it too. See
+[`docs/CALLERS.md`](docs/CALLERS.md): give them the hub token's Keychain
+location and the agent card URL, and the card covers the rest.
