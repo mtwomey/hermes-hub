@@ -102,13 +102,23 @@ def build_hub_app(
     router = router or Router(base_url=base_url)
 
     executor = HubExecutor(router=router, timeout_seconds=task_timeout_seconds)
-    base_card = build_hub_agent_card(registry, hub_name=hub_name, base_url=base_url)
+    def _build_card():
+        # ``router.base_url`` is authoritative when set: test harnesses bind
+        # an ephemeral port after the app is built and update it there.
+        return build_hub_agent_card(
+            registry,
+            hub_name=hub_name,
+            base_url=getattr(router, "base_url", "") or base_url,
+            task_timeout_seconds=task_timeout_seconds,
+        )
+
+    base_card = _build_card()
 
     async def card_modifier(card):
         # Rebuild the card fresh from the live registry on every request so
         # it always reflects currently-connected spokes (H5), not a stale
         # snapshot taken at process startup.
-        return build_hub_agent_card(registry, hub_name=hub_name, base_url=base_url)
+        return _build_card()
 
     handler = DefaultRequestHandler(
         agent_executor=executor,
