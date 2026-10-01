@@ -26,6 +26,7 @@ not imported from it.
 from __future__ import annotations
 
 from typing import Any, Dict, List
+from urllib.parse import urlsplit
 
 from a2a.types import (
     AgentCapabilities,
@@ -53,6 +54,14 @@ SPOKE_NAME_METADATA_KEY = "spoke_name"
 
 _HUB_TOKEN_CMD = cc.keychain_command(cc.HUB_TOKEN_ACCOUNT)
 _SPOKE_CRED_CMD = cc.keychain_command(cc.CALLER_CREDENTIAL_ACCOUNT_TEMPLATE)
+
+
+def _local_url(base_url: str) -> str:
+    """Loopback form of the hub URL, for callers on the hub's own Mac."""
+    parts = urlsplit(base_url)
+    port = parts.port or 8770
+    scheme = parts.scheme or "http"
+    return f"{scheme}://127.0.0.1:{port}"
 
 
 def _fmt_seconds(value: float) -> str:
@@ -99,9 +108,20 @@ def caller_contract_params(
     """The structured caller contract carried in the routing extension."""
     timeout = _fmt_seconds(task_timeout_seconds)
     example_spoke = connected_spokes[0] if connected_spokes else "<spoke name>"
+    rpc_path = rpc_url[len(base_url):] if rpc_url.startswith(base_url) else "/a2a/v1"
     return {
         "connectedSpokes": list(connected_spokes),
         "rpcUrl": rpc_url,
+        "localRpcUrl": f"{_local_url(base_url)}{rpc_path}",
+        "urlNote": (
+            "rpcUrl is the hub's advertised LAN address. On the hub's own Mac, "
+            "localRpcUrl (loopback) reaches the same endpoint and is preferred."
+        ),
+        "requiredHeaders": {
+            "Authorization": "Bearer <hub token>",
+            cc.A2A_VERSION_HEADER: cc.A2A_PROTOCOL_VERSION,
+            "Content-Type": "application/json",
+        },
         "messageMetadata": {
             cc.META_TARGET_SPOKE: {
                 "required": True,
@@ -113,10 +133,13 @@ def caller_contract_params(
             cc.META_SPOKE_CREDENTIAL: {
                 "required": False,
                 "meaning": (
-                    "Opaque per-spoke caller secret. The hub relays it without "
-                    "checking; the spoke fails the task if it does not match. "
-                    "Spokes with a configured secret require it, so send it "
-                    "whenever the Keychain item exists."
+                    "Opaque per-spoke caller secret. The hub never checks it (hence "
+                    "required=false at the hub); it relays it to the spoke, and a "
+                    "spoke that has a secret configured fails the task without it."
+                ),
+                "sendWhen": (
+                    "Always send it when the Keychain item exists for that spoke; "
+                    "omit it only when there is no such item."
                 ),
             },
         },
@@ -160,10 +183,19 @@ def caller_contract_params(
             ),
             "followUp": (
                 "Keep the returned contextId and send it as params.message.contextId "
-                "to continue the same conversation with that spoke."
+                "(next to messageId) to continue the same conversation with that spoke."
             ),
             "lookup": 'GetTask with params {"id": "<task id>"} returns a task\'s current state.',
         },
+        "errors": (
+            "HTTP 401 = missing/wrong hub token (applies to this card too). "
+            "Otherwise HTTP 200 with either a JSON-RPC 'error' object (request "
+            "rejected before any task exists; e.g. -32009 VERSION_NOT_SUPPORTED "
+            f"when the {cc.A2A_VERSION_HEADER} header is missing, -32600 invalid "
+            "request, -32001 task not found) or a task whose status.state is "
+            "TASK_STATE_FAILED (routing/spoke failure; reason in "
+            "status.message.parts[].text). Check for 'error' before reading 'result'."
+        ),
         "artifacts": (
             f"GET {base_url}{ARTIFACT_DOWNLOAD_PATH}/{{taskId}}/{{artifactId}} with "
             "the same bearer token. Artifact ids, names, sha256 and sizes arrive "
@@ -202,7 +234,8 @@ def _extension_description(rpc_url: str) -> str:
     return (
         "REQUIRED. hermes-hub routes by message metadata, not by skill id. "
         f"POST JSON-RPC 2.0 ({cc.RECOMMENDED_METHOD} or SendMessage) to {rpc_url} with "
-        "'Authorization: Bearer <hub token>'. Set "
+        "the headers in params.requiredHeaders (Authorization: Bearer <hub token>, "
+        f"{cc.A2A_VERSION_HEADER}: {cc.A2A_PROTOCOL_VERSION}). Set "
         f"params.message.metadata.{cc.META_TARGET_SPOKE} to the spoke's exact name and "
         f"params.message.metadata.{cc.META_SPOKE_CREDENTIAL} to that spoke's caller "
         f"credential. On this Mac the hub token is `{_HUB_TOKEN_CMD}` and a spoke's "
@@ -232,7 +265,9 @@ def build_hub_agent_card(
         f"machines. Connected now: {spoke_names}.\n"
         f"HOW TO ASK A SPOKE: POST a JSON-RPC 2.0 request, method "
         f"{cc.RECOMMENDED_METHOD} (streaming SSE) or SendMessage (blocking), to "
-        f"{rpc_url} with header 'Authorization: Bearer <hub token>'. Put the target "
+        f"{rpc_url} (on this Mac: {_local_url(base_url)}{rpc_path}) with headers "
+        f"'Authorization: Bearer <hub token>', '{cc.A2A_VERSION_HEADER}: "
+        f"{cc.A2A_PROTOCOL_VERSION}' and 'Content-Type: application/json'. Put the target "
         f"spoke's exact name in params.message.metadata.{cc.META_TARGET_SPOKE} and "
         f"that spoke's caller credential in "
         f"params.message.metadata.{cc.META_SPOKE_CREDENTIAL}. Routing is by "

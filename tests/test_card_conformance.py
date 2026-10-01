@@ -50,6 +50,17 @@ def _routing_extension(card: dict) -> dict:
     return ext
 
 
+def _headers_from_card(card: dict, token: str) -> dict:
+    """Every HTTP header comes from the card, never from caller knowledge.
+
+    Placeholders of the form ``<...>`` are filled with the token; this is the
+    defect a cold-agent run found: the card omitted ``A2A-Version`` and this
+    test masked it by hard-coding the header.
+    """
+    required = _routing_extension(card)["params"]["requiredHeaders"]
+    return {k: re.sub(r"<[^>]+>", token, v) for k, v in required.items()}
+
+
 def _build_request_from_card(card: dict, *, spoke: str, text: str, credential: str | None) -> tuple[str, dict]:
     ext = _routing_extension(card)
     params = ext["params"]
@@ -70,16 +81,10 @@ def _build_request_from_card(card: dict, *, spoke: str, text: str, credential: s
     return rpc_url, body
 
 
-def _stream_terminal_state(rpc_url: str, body: dict, token: str) -> tuple[str, str]:
+def _stream_terminal_state(rpc_url: str, body: dict, headers: dict) -> tuple[str, str]:
     """Follow the card's 'result' instructions over SSE."""
     state, text = "", ""
-    with httpx.stream(
-        "POST",
-        rpc_url,
-        json=body,
-        headers={"Authorization": f"Bearer {token}", "A2A-Version": "1.0"},
-        timeout=30,
-    ) as resp:
+    with httpx.stream("POST", rpc_url, json=body, headers=headers, timeout=30) as resp:
         resp.raise_for_status()
         for line in resp.iter_lines():
             if not line.startswith("data:"):
@@ -115,7 +120,7 @@ def test_card_alone_suffices_to_route_a_task_to_a_spoke():
         rpc_url, body = _build_request_from_card(card, spoke="Olive", text="ping", credential=OLIVE_CRED)
         assert rpc_url == f"{hub.base_url}/a2a/v1"
 
-        state, text = _stream_terminal_state(rpc_url, body, HUB_TOKEN)
+        state, text = _stream_terminal_state(rpc_url, body, _headers_from_card(card, HUB_TOKEN))
         assert state == "TASK_STATE_COMPLETED", text
         assert text == "olive says: ping"
 
@@ -125,7 +130,7 @@ def test_card_statement_that_spoke_rejects_missing_credential_is_true():
         hub.add_spoke(name="Olive", expected_credential=OLIVE_CRED)
         card = _get_card(hub.base_url, HUB_TOKEN)
         rpc_url, body = _build_request_from_card(card, spoke="Olive", text="ping", credential=None)
-        state, text = _stream_terminal_state(rpc_url, body, HUB_TOKEN)
+        state, text = _stream_terminal_state(rpc_url, body, _headers_from_card(card, HUB_TOKEN))
         assert state == "TASK_STATE_FAILED"
         assert "credential" in text
 
@@ -137,7 +142,7 @@ def test_card_statement_that_routing_requires_target_spoke_is_true():
         card = _get_card(hub.base_url, HUB_TOKEN)
         rpc_url, body = _build_request_from_card(card, spoke="Olive", text="ping", credential=None)
         body["params"]["message"]["metadata"] = {"skillId": "Olive::general-reasoning"}
-        state, text = _stream_terminal_state(rpc_url, body, HUB_TOKEN)
+        state, text = _stream_terminal_state(rpc_url, body, _headers_from_card(card, HUB_TOKEN))
         assert state == "TASK_STATE_FAILED"
 
 
@@ -163,7 +168,7 @@ def test_send_message_blocks_until_terminal_as_card_states():
         resp = httpx.post(
             rpc_url,
             json=body,
-            headers={"Authorization": f"Bearer {HUB_TOKEN}", "A2A-Version": "1.0"},
+            headers=_headers_from_card(card, HUB_TOKEN),
             timeout=30,
         )
         elapsed = time.time() - started
@@ -194,6 +199,24 @@ def test_card_still_requires_the_hub_token():
     with LiveHub(external_token=HUB_TOKEN) as hub:
         resp = httpx.get(f"{hub.base_url}/.well-known/agent-card.json", timeout=10)
         assert resp.status_code == 401
+
+
+def test_omitting_card_required_headers_fails_as_card_warns():
+    """Each card-declared header is load-bearing: dropping A2A-Version yields
+    the JSON-RPC error the card's 'errors' text describes."""
+    with LiveHub(external_token=HUB_TOKEN) as hub:
+        hub.add_spoke(name="Olive")
+        card = _get_card(hub.base_url, HUB_TOKEN)
+        params = _routing_extension(card)["params"]
+        headers = _headers_from_card(card, HUB_TOKEN)
+        assert "A2A-Version" in headers
+        headers.pop("A2A-Version")
+        rpc_url, body = _build_request_from_card(card, spoke="Olive", text="ping", credential=None)
+        body["method"] = "SendMessage"
+        resp = httpx.post(rpc_url, json=body, headers=headers, timeout=30)
+        assert resp.status_code == 200
+        assert resp.json()["error"]["code"] == -32009
+        assert "-32009" in params["errors"]
 
 
 def test_this_file_does_not_import_hermes_hub():

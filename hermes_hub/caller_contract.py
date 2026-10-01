@@ -28,6 +28,12 @@ ENV_HUB_TOKEN = "HERMES_HUB_TOKEN"
 ENV_CALLER_CREDENTIAL_PREFIX = "HERMES_HUB_PEER_CREDENTIAL_"
 ENV_CALLER_CREDENTIAL_TEMPLATE = ENV_CALLER_CREDENTIAL_PREFIX + "{SPOKE_UPPER}"
 
+#: A2A protocol version the hub's handler accepts. Callers MUST send it as
+#: the ``A2A-Version`` header; without it the SDK assumes 0.3 and rejects the
+#: call with JSON-RPC error -32009 (found by a cold-agent acceptance run).
+A2A_PROTOCOL_VERSION = "1.0"
+A2A_VERSION_HEADER = "A2A-Version"
+
 #: JSON-RPC method callers should use to ask a spoke.
 RECOMMENDED_METHOD = "SendStreamingMessage"
 
