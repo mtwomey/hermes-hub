@@ -67,9 +67,11 @@ Nothing is hardcoded. Every value is resolved at call time.
 | `hub_url` | `~/.hermes-hub/config.json` | Same, as a file |
 | `HERMES_HUB_TOKEN` | env | Bearer token for the hub's external A2A surface |
 | `hub_token` | `~/.hermes-hub/config.json` | Same, as a file |
+| `hub:external:token` | macOS Keychain, service `hermes-hub` | Hub token (last fallback; the normal source on the hub's Mac) |
 
-Resolution order for each: explicit tool argument → environment → config
-file → (for the URL) the default `http://127.0.0.1:8770`.
+Resolution order: explicit tool argument → environment → config file →
+(token) Keychain `hermes-hub` / `hub:external:token`; (URL) the default
+`http://127.0.0.1:8770`.
 
 Example `~/.hermes-hub/config.json`:
 

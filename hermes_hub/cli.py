@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import httpx
 
+from .caller_contract import META_SPOKE_CREDENTIAL, META_TARGET_SPOKE
+
 
 # -- hermes-hub: hub process + external CLI verbs ----------------------------
 
@@ -89,9 +91,9 @@ def build_streaming_message_body(
     ``file_bytes`` (Task 2.5, V9): an inbound file to send to the spoke,
     inline base64 in a ``raw`` A2A Part alongside the text part.
     """
-    metadata: Dict[str, Any] = {"targetSpoke": spoke}
+    metadata: Dict[str, Any] = {META_TARGET_SPOKE: spoke}
     if credential:
-        metadata["spokeCredential"] = credential
+        metadata[META_SPOKE_CREDENTIAL] = credential
     parts: List[Dict[str, Any]] = [{"text": text}]
     if file_bytes is not None:
         import base64

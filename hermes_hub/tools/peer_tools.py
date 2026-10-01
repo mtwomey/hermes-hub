@@ -41,13 +41,17 @@ from typing import Any, Callable, Dict, List, Optional
 
 from hermes_hub.hub_client import HubClient, HubClientError
 
-#: Keychain service shared with the spoke side (``credentials.py``).
-KEYCHAIN_SERVICE = "hermes-hub"
+from hermes_hub.caller_contract import (
+    ENV_CALLER_CREDENTIAL_PREFIX as ENV_CREDENTIAL_PREFIX,
+    ENV_HUB_TOKEN,
+    EXTENSION_URI,
+    HUB_TOKEN_ACCOUNT,
+    KEYCHAIN_SERVICE,
+    caller_credential_account,
+    caller_credential_env,
+)
 
 ENV_HUB_URL = "HERMES_HUB_URL"
-ENV_HUB_TOKEN = "HERMES_HUB_TOKEN"
-#: Per-spoke caller credential, e.g. ``HERMES_HUB_PEER_CREDENTIAL_OLIVE``.
-ENV_CREDENTIAL_PREFIX = "HERMES_HUB_PEER_CREDENTIAL_"
 
 DEFAULT_HUB_URL = "http://127.0.0.1:8770"
 
@@ -106,7 +110,7 @@ def resolve_hub_token(explicit: str = "") -> str:
     configured = str(_load_config().get("hub_token") or "")
     if configured:
         return configured
-    return _keychain_read("hub:external:token")
+    return _keychain_read(HUB_TOKEN_ACCOUNT)
 
 
 def _keychain_read(account: str) -> str:
@@ -148,11 +152,11 @@ def resolve_peer_credential(spoke_name: str, *, explicit: str = "") -> str:
     """
     if explicit:
         return explicit
-    env_key = f"{ENV_CREDENTIAL_PREFIX}{spoke_name.upper().replace('-', '_')}"
+    env_key = caller_credential_env(spoke_name)
     env_value = os.environ.get(env_key, "")
     if env_value:
         return env_value
-    return _keychain_read(f"caller:{spoke_name}:credential")
+    return _keychain_read(caller_credential_account(spoke_name))
 
 
 def hub_configured() -> bool:
@@ -200,17 +204,14 @@ def _spokes_from_card(card: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     both so the model sees a clean per-spoke view with real prose (Task 1.3).
     """
     spokes: Dict[str, Dict[str, Any]] = {}
-    for name in _connected_names_from_description(card):
+    for name in _connected_names(card):
         spokes.setdefault(name, {"name": name, "skills": []})
     for skill in card.get("skills", []) or []:
         raw_id = str(skill.get("id") or "")
         if "::" not in raw_id:
             continue
         spoke_name, _, skill_id = raw_id.partition("::")
-        description = str(skill.get("description") or "")
-        prefix = f"[spoke: {spoke_name}]"
-        if description.startswith(prefix):
-            description = description[len(prefix) :].strip()
+        description = _strip_spoke_prefix(spoke_name, str(skill.get("description") or ""))
         entry = spokes.setdefault(spoke_name, {"name": spoke_name, "skills": []})
         entry["skills"].append(
             {
@@ -224,13 +225,37 @@ def _spokes_from_card(card: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return spokes
 
 
-def _connected_names_from_description(card: Dict[str, Any]) -> List[str]:
+def _strip_spoke_prefix(spoke_name: str, description: str) -> str:
+    """Remove the hub's ``[spoke: <name> ...]`` tag from a skill description.
+
+    Handles both the original ``[spoke: X]`` form and the self-describing
+    ``[spoke: X — address with metadata targetSpoke="X"]`` form.
+    """
+    opener = f"[spoke: {spoke_name}"
+    if description.startswith(opener):
+        end = description.find("]")
+        if end != -1:
+            return description[end + 1 :].strip()
+    return description
+
+
+def _connected_names(card: Dict[str, Any]) -> List[str]:
     """Spokes connected right now, including ones advertising no skills.
 
-    The hub's card description ends with
-    ``Currently connected: A, B.`` (or a "no spokes" sentinel), which is the
-    only place a skill-less spoke appears.
+    Prefers the structured ``connectedSpokes`` param of the hub's routing
+    extension; falls back to parsing the legacy description sentence for
+    hubs that predate the self-describing card.
     """
+    for ext in (card.get("capabilities") or {}).get("extensions", []) or []:
+        if ext.get("uri") == EXTENSION_URI:
+            names = (ext.get("params") or {}).get("connectedSpokes")
+            if isinstance(names, list):
+                return [str(n) for n in names if str(n)]
+    return _connected_names_from_description(card)
+
+
+def _connected_names_from_description(card: Dict[str, Any]) -> List[str]:
+    """Legacy: parse ``Currently connected: A, B.`` from an old hub's card."""
     description = str(card.get("description") or "")
     marker = "Currently connected: "
     if marker not in description:
