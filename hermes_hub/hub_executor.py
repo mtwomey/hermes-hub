@@ -19,6 +19,7 @@ from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
 from a2a.types import Part, Task, TaskState, TaskStatus
 
+from .caller_contract import META_SPOKE_CREDENTIAL, META_TARGET_SPOKE
 from .router import Router, SpokeUnavailableError
 
 
@@ -95,12 +96,12 @@ class HubExecutor(AgentExecutor):
         await updater.start_work()
 
         metadata = message_metadata(context)
-        spoke_name = str(metadata.get("targetSpoke") or metadata.get("target_spoke") or "")
-        credential = str(metadata.get("spokeCredential") or "")
+        spoke_name = str(metadata.get(META_TARGET_SPOKE) or metadata.get("target_spoke") or "")
+        credential = str(metadata.get(META_SPOKE_CREDENTIAL) or "")
         # Do not carry the credential twice: it travels in the frame's own
         # `credential` field. Leaving it duplicated in `metadata` as well
         # would widen the surface for accidental logging.
-        metadata = {k: v for k, v in metadata.items() if k != "spokeCredential"}
+        metadata = {k: v for k, v in metadata.items() if k != META_SPOKE_CREDENTIAL}
         text = message_text(context)
         inbound_file = message_inbound_file(context)
 

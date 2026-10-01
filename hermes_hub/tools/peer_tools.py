@@ -41,13 +41,16 @@ from typing import Any, Callable, Dict, List, Optional
 
 from hermes_hub.hub_client import HubClient, HubClientError
 
-#: Keychain service shared with the spoke side (``credentials.py``).
-KEYCHAIN_SERVICE = "hermes-hub"
+from hermes_hub.caller_contract import (
+    ENV_CALLER_CREDENTIAL_PREFIX as ENV_CREDENTIAL_PREFIX,
+    ENV_HUB_TOKEN,
+    HUB_TOKEN_ACCOUNT,
+    KEYCHAIN_SERVICE,
+    caller_credential_account,
+    caller_credential_env,
+)
 
 ENV_HUB_URL = "HERMES_HUB_URL"
-ENV_HUB_TOKEN = "HERMES_HUB_TOKEN"
-#: Per-spoke caller credential, e.g. ``HERMES_HUB_PEER_CREDENTIAL_OLIVE``.
-ENV_CREDENTIAL_PREFIX = "HERMES_HUB_PEER_CREDENTIAL_"
 
 DEFAULT_HUB_URL = "http://127.0.0.1:8770"
 
@@ -106,7 +109,7 @@ def resolve_hub_token(explicit: str = "") -> str:
     configured = str(_load_config().get("hub_token") or "")
     if configured:
         return configured
-    return _keychain_read("hub:external:token")
+    return _keychain_read(HUB_TOKEN_ACCOUNT)
 
 
 def _keychain_read(account: str) -> str:
@@ -148,11 +151,11 @@ def resolve_peer_credential(spoke_name: str, *, explicit: str = "") -> str:
     """
     if explicit:
         return explicit
-    env_key = f"{ENV_CREDENTIAL_PREFIX}{spoke_name.upper().replace('-', '_')}"
+    env_key = caller_credential_env(spoke_name)
     env_value = os.environ.get(env_key, "")
     if env_value:
         return env_value
-    return _keychain_read(f"caller:{spoke_name}:credential")
+    return _keychain_read(caller_credential_account(spoke_name))
 
 
 def hub_configured() -> bool:

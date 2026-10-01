@@ -35,6 +35,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from .caller_contract import META_SPOKE_CREDENTIAL, META_TARGET_SPOKE
+
 #: Every A2A HTTP request needs this header.
 A2A_VERSION_HEADER = {"A2A-Version": "1.0"}
 
@@ -124,9 +126,9 @@ class HubClient:
         and is omitted entirely when empty so a caller with nothing
         configured produces the same request shape as before this existed.
         """
-        metadata: Dict[str, Any] = {"targetSpoke": spoke_name}
+        metadata: Dict[str, Any] = {META_TARGET_SPOKE: spoke_name}
         if credential:
-            metadata["spokeCredential"] = credential
+            metadata[META_SPOKE_CREDENTIAL] = credential
         parts: List[Dict[str, Any]] = [{"text": text}]
         if file_bytes is not None:
             parts.append(

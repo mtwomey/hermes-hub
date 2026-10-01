@@ -22,7 +22,7 @@ import os
 import shutil
 import subprocess
 
-KEYCHAIN_SERVICE = "hermes-hub"
+from .caller_contract import HUB_TOKEN_ACCOUNT, KEYCHAIN_SERVICE
 ENV_VAR_NAME = "HERMES_HUB_SPOKE_CREDENTIAL"
 
 
@@ -54,7 +54,7 @@ def _read_keychain_account(account: str) -> str:
 
 def require_hub_credentials() -> tuple[str, str]:
     """Return managed hub external/spoke tokens from Keychain or fail closed."""
-    external = _read_keychain_account("hub:external:token")
+    external = _read_keychain_account(HUB_TOKEN_ACCOUNT)
     spoke = _read_keychain_account("hub:spoke:token")
     if not external or not spoke:
         raise CredentialUnavailable("managed hub requires Keychain hub credentials")
