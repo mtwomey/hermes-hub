@@ -278,3 +278,16 @@ def test_card_documents_message_id_dedup_and_duplicate_protection():
         assert "new_request" in dedup["hermesPeerTools"]
         assert "recent requests" in dedup["spokeMemory"].lower()
         assert "messageId" in params["methods"]["submitAndPoll"]
+
+
+def test_card_documents_cancel_and_ttl_auto_cancel():
+    """Phase 3.5 (BEA-306): CancelTask supported; TTL expiry auto-cancels."""
+    with LiveHub(external_token=HUB_TOKEN) as hub:
+        params = _routing_extension(_get_card(hub.base_url, HUB_TOKEN))["params"]
+        cancel = params["cancel"]
+        assert cancel["method"] == "CancelTask"
+        assert cancel["params"] == {"id": "<task id>"}
+        assert "TASK_STATE_CANCELED" in cancel["result"]
+        assert "TASK_STATE_CANCELED" in params["taskLifetime"]["onExpiry"]
+        assert "TASK_STATE_FAILED" not in params["taskLifetime"]["onExpiry"]
+        assert "cancelled" in params["hermesErrors"]

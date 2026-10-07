@@ -224,11 +224,23 @@ def caller_contract_params(
             if float(task_timeout_seconds).is_integer()
             else task_timeout_seconds,
             "onExpiry": (
-                "A task with no terminal frame after ttlSeconds ends "
-                "TASK_STATE_FAILED with status.message.metadata.hermesError="
+                "A task with no terminal frame after ttlSeconds is auto-stopped: "
+                "the hub tells the spoke to interrupt its agent and the task ends "
+                "TASK_STATE_CANCELED with status.message.metadata.hermesError="
                 "ttl_expired. A caller disconnecting never fails a task."
             ),
             "resultRetention": "In hub memory until the hub restarts.",
+        },
+        "cancel": {
+            "method": "CancelTask",
+            "params": {"id": "<task id>"},
+            "result": (
+                "The task, ending TASK_STATE_CANCELED with status.message.metadata."
+                "hermesError=cancelled. The hub forwards the cancel to the spoke, which "
+                "interrupts its running agent (cooperative: a tool call already running "
+                "may finish first) and discards any late result. A task already in a "
+                "terminal state returns a JSON-RPC error (not cancelable)."
+            ),
         },
         "deduplication": {
             "messageId": (
@@ -257,7 +269,8 @@ def caller_contract_params(
             "spoke_unavailable": "the named spoke is not connected (no queueing)",
             "spoke_task_failed": "the spoke reported failure (e.g. credential rejected)",
             "spoke_disconnected": "the spoke's connection dropped before it finished",
-            "ttl_expired": "no result within taskLifetime.ttlSeconds",
+            "ttl_expired": "no result within taskLifetime.ttlSeconds; auto-cancelled",
+            "cancelled": "a caller cancelled the task (CancelTask)",
         },
         "errors": (
             "HTTP 401 = missing/wrong hub token (applies to this card too). "

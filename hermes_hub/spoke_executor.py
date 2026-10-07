@@ -36,10 +36,12 @@ from .protocol import (
     build_artifact_chunk_frame,
     build_artifact_end_frame,
     build_task_artifact_frame,
+    build_task_cancelled_frame,
     build_task_complete_frame,
     build_task_failed_frame,
     build_task_status_frame,
     chunk_artifact_bytes,
+    parse_task_cancel_frame,
     reassemble_artifact_chunks,
 )
 from .ledger import RequestLedger, caller_label, format_recent_requests
@@ -115,6 +117,7 @@ def run_real_hermes_turn(
     output_dir: Optional[Path] = None,
     input_files: Optional[List[Path]] = None,
     recent_requests: Optional[List[Dict[str, Any]]] = None,
+    on_agent: Optional[Callable[[Any], None]] = None,
 ) -> str:
     """Run one real Hermes agent turn, with explicit session history reload.
 
@@ -173,8 +176,35 @@ def run_real_hermes_turn(
             recent_requests=recent_requests,
         ),
     )
+    if on_agent is not None:
+        # Phase 3.2: hand the live agent to the executor so a hub
+        # task_cancel can interrupt it from the event-loop thread.
+        on_agent(agent)
     result = agent.run_conversation(text, conversation_history=conversation_history)
     return str(result.get("final_response") or "")
+
+
+def interrupt_hermes_agent(agent: Any) -> None:
+    """Phase 3.2: stop a running Hermes agent from another thread.
+
+    Uses the gateway's own stop entry point
+    (``agent.interrupt_compat.request_hard_interrupt``); falls back to the
+    legacy ``hard_interrupt``/``interrupt`` ABI when that module is absent.
+    Cooperative: the in-flight model request is aborted, a tool call that is
+    already executing finishes or notices the flag on its own.
+    """
+    try:
+        from agent.interrupt_compat import request_hard_interrupt
+
+        request_hard_interrupt(agent, "Cancelled by caller via hub", tool_reason="hub cancel")
+        return
+    except ImportError:
+        pass
+    for name in ("hard_interrupt", "interrupt"):
+        fn = getattr(agent, name, None)
+        if callable(fn):
+            fn("Cancelled by caller via hub")
+            return
 
 
 def _open_session_db():
@@ -210,8 +240,17 @@ class SpokeExecutor:
         artifact_root: Optional[Path] = None,
         chunk_bytes: int = 262144,
         ledger: Optional[RequestLedger] = None,
+        interrupter: Optional[Callable[[Any], None]] = None,
     ) -> None:
         self.spoke_name = spoke_name
+        #: Phase 3.2: how a running agent is stopped on task_cancel.
+        self.interrupter = interrupter or interrupt_hermes_agent
+        #: task_id -> background asyncio task running handle_task_frame.
+        self._running: Dict[str, "asyncio.Task[None]"] = {}
+        #: task_id -> live agent handle (set via the runner's on_agent hook).
+        self._agents: Dict[str, Any] = {}
+        #: task_ids cancelled by the hub; their results are discarded.
+        self._cancelled: set = set()
         #: Phase 2.4: recent-request ledger (None = disabled; the spoke CLI
         #: wires the persistent one).
         self.ledger = ledger
@@ -237,10 +276,12 @@ class SpokeExecutor:
             self._agent_runner_accepts_output_dir = "output_dir" in sig_params
             self._agent_runner_accepts_input_files = "input_files" in sig_params
             self._agent_runner_accepts_recent = "recent_requests" in sig_params
+            self._agent_runner_accepts_on_agent = "on_agent" in sig_params
         except (TypeError, ValueError):
             self._agent_runner_accepts_output_dir = False
             self._agent_runner_accepts_input_files = False
             self._agent_runner_accepts_recent = False
+            self._agent_runner_accepts_on_agent = False
         #: (Task 2.5, W2) In-flight inbound-artifact reassembly buffers,
         #: keyed by task_id -> artifact_id -> {"begin": frame, "chunks": []}.
         #: Populated by handle_frame on artifact_begin/chunk/end received
@@ -278,8 +319,63 @@ class SpokeExecutor:
             # here beyond leaving the buffer populated for that lookup.
             return
         if frame_type == "task":
-            await self.handle_task_frame(frame)
+            # Phase 3.2: run the turn in the background so the receive loop
+            # keeps reading frames (task_cancel, other tasks) meanwhile.
+            task_id = str(frame.get("task_id") or "")
+            bg = asyncio.ensure_future(self.handle_task_frame(frame))
+            self._running[task_id] = bg
+            bg.add_done_callback(lambda f, tid=task_id: self._task_done(tid, f))
             return
+        if frame_type == "task_cancel":
+            await self.handle_cancel_frame(frame)
+            return
+
+    def _task_done(self, task_id: str, fut: "asyncio.Future[None]") -> None:
+        if self._running.get(task_id) is fut:
+            self._running.pop(task_id, None)
+        self._agents.pop(task_id, None)
+        self._cancelled.discard(task_id)
+        if not fut.cancelled() and fut.exception() is not None:
+            logger.error("task %s: executor error", task_id, exc_info=fut.exception())
+
+    async def drain(self) -> None:
+        """Wait for every background task to finish (tests / shutdown)."""
+        while self._running:
+            await asyncio.gather(*list(self._running.values()), return_exceptions=True)
+
+    async def handle_cancel_frame(self, frame: Dict[str, Any]) -> None:
+        """Phase 3.2: hub asked us to stop ``task_id``.
+
+        Marks it cancelled (later result/failure/artifacts are discarded),
+        interrupts the live agent when its handle is known, and acknowledges
+        with a terminal ``task_cancelled`` frame exactly once."""
+        try:
+            task_id, reason = parse_task_cancel_frame(frame)
+        except ValueError as exc:
+            logger.warning("ignoring malformed task_cancel frame: %s", exc)
+            return
+        if task_id in self._cancelled:
+            return
+        running = task_id in self._running
+        if running:
+            self._cancelled.add(task_id)
+        agent = self._agents.get(task_id)
+        if agent is not None:
+            try:
+                await asyncio.to_thread(self.interrupter, agent)
+                logger.info("task %s: cancel requested (%s), agent interrupted", task_id, reason)
+            except Exception:  # noqa: BLE001
+                logger.warning("task %s: agent interrupt failed; discarding result", task_id, exc_info=True)
+        elif running:
+            logger.info(
+                "task %s: cancel requested (%s), no agent handle; result will be discarded",
+                task_id, reason,
+            )
+        else:
+            logger.info("task %s: cancel for unknown/finished task (%s); acknowledging", task_id, reason)
+        if running:
+            self._ledger_end(task_id, "cancelled", "")
+        await self.send(build_task_cancelled_frame(task_id=task_id, reason=reason))
 
     async def handle_task_frame(self, frame: Dict[str, Any]) -> None:
         task_id = str(frame.get("task_id") or "")
@@ -339,6 +435,13 @@ class SpokeExecutor:
             if self._agent_runner_accepts_recent:
                 runner_kwargs["recent_requests"] = recent
 
+        if task_id in self._cancelled:
+            logger.info("task %s: cancelled before agent start; not running it", task_id)
+            shutil.rmtree(output_dir, ignore_errors=True)
+            return
+        if self._agent_runner_accepts_on_agent:
+            runner_kwargs["on_agent"] = lambda agent, tid=task_id: self._agents.__setitem__(tid, agent)
+
         run_future = asyncio.ensure_future(
             asyncio.to_thread(self.agent_runner, **runner_kwargs)
         )
@@ -350,11 +453,20 @@ class SpokeExecutor:
                 )
                 if run_future in done:
                     break
-                await self.send(build_task_status_frame(task_id=task_id))
+                if task_id not in self._cancelled:
+                    await self.send(build_task_status_frame(task_id=task_id))
             answer = run_future.result()
         except Exception as exc:  # noqa: BLE001 - surfaced to the hub as failed
+            if task_id in self._cancelled:
+                logger.info("task %s: agent stopped after cancel (%s); discarded", task_id, type(exc).__name__)
+                shutil.rmtree(output_dir, ignore_errors=True)
+                return
             self._ledger_end(task_id, "failed", str(exc))
             await self.send(build_task_failed_frame(task_id=task_id, error=str(exc)))
+            shutil.rmtree(output_dir, ignore_errors=True)
+            return
+        if task_id in self._cancelled:
+            logger.info("task %s: late result after cancel discarded (no task_complete sent)", task_id)
             shutil.rmtree(output_dir, ignore_errors=True)
             return
         self._ledger_end(task_id, "completed", str(answer or ""))

@@ -115,6 +115,9 @@ class FakeUpdater:
     async def complete(self, message=None):
         self.events.append(("complete", message))
 
+    async def cancel(self, message=None):
+        self.events.append(("cancel", message))
+
     async def add_artifact(self, *a, **k):
         self.events.append(("artifact", k))
 
@@ -147,7 +150,9 @@ def test_executor_ttl_expiry_is_ttl_expired_not_timeout(monkeypatch):
     router.register_connection("Olive", FakeConnection())
     updater = _run_executor(monkeypatch, router, {"targetSpoke": "Olive"}, ttl=0.1)
     kind, message = updater.events[-1]
-    assert kind == "failed"
+    # Phase 3.3 (BEA-306) superseded "FAILED until Phase 3 lands": TTL now
+    # auto-cancels (task_cancel to the spoke, task CANCELED, same reason).
+    assert kind == "cancel"
     assert message["metadata"] == {"hermesError": "ttl_expired"}
 
 

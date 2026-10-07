@@ -180,6 +180,51 @@ duplicate messageId via raw curl → single execution.
    fall back to "stop forwarding + mark cancelled + discard result" and record
    the residual compute cost honestly. Reply with `task_failed`
    (`cancelled`) or a dedicated `task_cancelled` frame.
+   - **CLOSED (BEA-306, verified against hermes-agent 1212a7f18ce):** a real
+     cross-thread interrupt API exists. `AIAgent` mixes in
+     `agent/interrupt_control.py:InterruptControlMixin`:
+     `interrupt(message=None, *, hard_cancel=False, tool_reason=None)` and
+     `hard_interrupt(message=None, *, tool_reason=None)` are documented as
+     "call from another thread"; they set `_interrupt_requested`, set the
+     `_hard_interrupt_requested` event, abort the in-flight model request
+     (`_ic_abort_active_request`), signal the per-thread tool interrupt for
+     the agent's execution thread and tool workers, and propagate to child
+     (delegate) agents. If the interrupt lands before `run_conversation`
+     binds its execution thread it is deferred (`_interrupt_thread_signal_
+     pending`), so an early cancel is not lost. The supported entry point is
+     `agent/interrupt_compat.py:request_hard_interrupt(agent, message,
+     tool_reason=...)` — the same call the gateway uses for its TTL and API
+     `/stop` (`gateway/run.py:2708`, `gateway/platforms/api_server_runs.py:
+     1270`); it falls back to legacy `interrupt()` for stand-ins.
+     **Design:** `run_agent_turn` gains an optional `on_agent(agent)` hook
+     invoked right after `AIAgent(...)` is built (before `run_conversation`);
+     `SpokeExecutor` stores the handle per task_id. On `task_cancel` the
+     executor records the task as cancelled, calls
+     `request_hard_interrupt(agent, "Cancelled by caller via hub",
+     tool_reason="hub cancel")` in a worker thread, logs
+     `task <id>: cancel requested, agent interrupted`, sends a dedicated
+     terminal `task_cancelled` frame, and suppresses any later
+     `task_complete`/`task_failed`/artifact frames for that task (result
+     discarded, ledger state `cancelled`). Fallback when no handle is
+     registered yet or the runner does not accept `on_agent` (test runners,
+     old runners): same stop-forwarding + discard path.
+     **Residual cost, stated plainly:** interruption is cooperative. The
+     in-flight model HTTP request is aborted, but a tool call already
+     executing (e.g. a long terminal command) runs until it next checks the
+     interrupt flag or finishes, and tokens already generated are billed.
+     The worker thread itself cannot be killed; it exits when
+     `run_conversation` returns. The hub never waits on it.
+     **Prerequisite found (BEA-306):** `SpokeClient._receive_loop` awaits
+     `on_frame(frame)` and `SpokeExecutor.handle_frame` awaits
+     `handle_task_frame` for the whole agent turn, so while a task runs the
+     spoke reads no further frames — a `task_cancel` would only be seen after
+     the task finished (and concurrent tasks to one spoke are serialized
+     today). 3.2 must therefore dispatch `task` frames as tracked background
+     asyncio tasks (`handle_frame` returns immediately; `_running[task_id]`
+     holds the asyncio task + agent handle; exceptions logged), keep
+     artifact frames in-order on the receive loop, and handle `task_cancel`
+     inline. Tests: cancel received while a slow runner is blocked; second
+     task frame is read while the first runs.
 3.3 **Hub:** `HubExecutor.cancel` (A2A `CancelTask`) and TTL expiry both send
    `task_cancel`; task ends `CANCELED`.
 3.4 **Tool:** `peer_cancel(task_id)`; in-flight guard entry cleared.
@@ -211,7 +256,7 @@ MCP adapter (W6); cross-machine credential distribution.
 ## Risks / open spec items
 
 - Caller-session identity source for the in-flight guard (2.2).
-- Hermes agent interrupt API for real cancellation (3.2).
+- Hermes agent interrupt API for real cancellation (3.2) — CLOSED (BEA-306): `request_hard_interrupt`; cooperative, residual cost noted in 3.2.
 - Spoke WebSocket drop mid-task still loses the result until Phase 4.3; Phase 1
   should at least mark such tasks `failed: spoke_disconnected` promptly rather
   than waiting for TTL.

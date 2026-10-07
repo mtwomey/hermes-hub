@@ -34,8 +34,12 @@ FRAME_TASK_FAILED = "task_failed"
 FRAME_ARTIFACT_BEGIN = "artifact_begin"
 FRAME_ARTIFACT_CHUNK = "artifact_chunk"
 FRAME_ARTIFACT_END = "artifact_end"
+FRAME_TASK_CANCEL = "task_cancel"
+FRAME_TASK_CANCELLED = "task_cancelled"
 
-TERMINAL_FRAME_TYPES = frozenset({FRAME_TASK_COMPLETE, FRAME_TASK_FAILED})
+TERMINAL_FRAME_TYPES = frozenset(
+    {FRAME_TASK_COMPLETE, FRAME_TASK_FAILED, FRAME_TASK_CANCELLED}
+)
 
 #: 256 KiB of raw bytes per chunk frame (base64-expanded on the wire).
 CHUNK_BYTES = 262144
@@ -178,6 +182,34 @@ def build_task_complete_frame(*, task_id: str, text: str) -> Dict[str, Any]:
 def build_task_failed_frame(*, task_id: str, error: str) -> Dict[str, Any]:
     """Spoke -> hub: the final failure for a routed task."""
     return {"type": FRAME_TASK_FAILED, "task_id": task_id, "error": error}
+
+
+def build_task_cancel_frame(*, task_id: str, reason: str = "cancelled") -> Dict[str, Any]:
+    """Hub -> spoke: stop working on ``task_id`` (A2A CancelTask or TTL
+    expiry). Not terminal by itself; the spoke answers ``task_cancelled``."""
+    return {"type": FRAME_TASK_CANCEL, "task_id": task_id, "reason": reason}
+
+
+def build_task_cancelled_frame(*, task_id: str, reason: str = "cancelled") -> Dict[str, Any]:
+    """Spoke -> hub: terminal acknowledgement that ``task_id`` was cancelled
+    and its result (if any) discarded."""
+    return {"type": FRAME_TASK_CANCELLED, "task_id": task_id, "reason": reason}
+
+
+def parse_task_cancel_frame(frame: Dict[str, Any]) -> "tuple[str, str]":
+    """Validate a ``task_cancel`` frame; return ``(task_id, reason)``.
+
+    Raises ``ValueError`` for a wrong type, missing/empty/non-str task_id, or
+    non-str reason. ``reason`` defaults to ``"cancelled"``."""
+    if not isinstance(frame, dict) or frame.get("type") != FRAME_TASK_CANCEL:
+        raise ValueError("not a task_cancel frame")
+    task_id = frame.get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        raise ValueError("task_cancel frame needs a non-empty task_id")
+    reason = frame.get("reason", "cancelled")
+    if not isinstance(reason, str):
+        raise ValueError("task_cancel reason must be a string")
+    return task_id, reason or "cancelled"
 
 
 def is_terminal_frame(frame: Dict[str, Any]) -> bool:

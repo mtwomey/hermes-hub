@@ -12,6 +12,7 @@ the external caller genuinely incremental (Gate 3).
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Mapping
 
@@ -83,6 +84,9 @@ async def open_task(context: RequestContext, event_queue: EventQueue) -> TaskUpd
             )
         )
     return TaskUpdater(event_queue, context.task_id, context.context_id)
+
+
+logger = logging.getLogger("hermes_hub.hub_executor")
 
 
 class HubExecutor(AgentExecutor):
@@ -203,6 +207,14 @@ class HubExecutor(AgentExecutor):
                         )
                     )
                     return
+                elif frame_type == "task_cancelled":
+                    await updater.cancel(
+                        updater.new_agent_message(
+                            [Part(text="Cancelled; the spoke stopped the task.")],
+                            metadata={"hermesError": str(frame.get("reason") or "cancelled")},
+                        )
+                    )
+                    return
         except SpokeUnavailableError as exc:
             await updater.failed(
                 updater.new_agent_message(
@@ -211,7 +223,10 @@ class HubExecutor(AgentExecutor):
                 )
             )
         except TaskTTLExpired as exc:
-            await updater.failed(
+            # Phase 3.3: TTL is an auto-stop. The router already sent the
+            # spoke a task_cancel; the task ends CANCELED (hermesError keeps
+            # the ttl_expired reason).
+            await updater.cancel(
                 updater.new_agent_message(
                     [Part(text=str(exc))],
                     metadata={"hermesError": "ttl_expired"},
@@ -219,5 +234,18 @@ class HubExecutor(AgentExecutor):
             )
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
+        """A2A CancelTask (Phase 3.3): tell the spoke to interrupt the agent,
+        then end the task CANCELED. The SDK cancels the running ``execute``
+        right after this returns, so the spoke's own ``task_cancelled`` ack
+        is logged by the router as a late frame."""
+        try:
+            await self.router.cancel_task(str(context.task_id), reason="cancelled")
+        except Exception:  # noqa: BLE001 - never block the hub-side cancel
+            logger.warning("task_cancel forward failed for task_id=%s", context.task_id)
         updater = await open_task(context, event_queue)
-        await updater.cancel()
+        await updater.cancel(
+            updater.new_agent_message(
+                [Part(text="Cancelled by caller.")],
+                metadata={"hermesError": "cancelled"},
+            )
+        )
