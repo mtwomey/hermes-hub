@@ -218,3 +218,124 @@ def test_executor_maps_spoke_disconnect_to_hermes_error(monkeypatch):
     kind, message = updater.events[-1]
     assert kind == "failed"
     assert message["metadata"] == {"hermesError": "spoke_disconnected"}
+
+
+# ---- 1.3 liveness metadata ---------------------------------------------
+
+
+def test_executor_records_started_and_heartbeat_metadata(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    router = Router()
+    router.register_connection("Olive", FakeConnection())
+    t0 = datetime(2026, 10, 7, 12, 0, 0, tzinfo=timezone.utc)
+    ticks = iter([t0, t0 + timedelta(seconds=30), t0 + timedelta(seconds=60)])
+
+    original = router.route_task
+
+    async def route_with_heartbeat(**kwargs):
+        async def spoke():
+            await asyncio.sleep(0.02)
+            await router.dispatch_frame_from_spoke({"type": "task_status", "task_id": "t1", "text": "hb"})
+            await asyncio.sleep(0.02)
+            await router.dispatch_frame_from_spoke({"type": "task_complete", "task_id": "t1", "text": "ok"})
+
+        asyncio.ensure_future(spoke())
+        async for frame in original(**kwargs):
+            yield frame
+
+    router.route_task = route_with_heartbeat
+    updater = FakeUpdater()
+
+    async def fake_open_task(context, event_queue):
+        return updater
+
+    monkeypatch.setattr(hub_executor_mod, "open_task", fake_open_task)
+    monkeypatch.setattr(hub_executor_mod, "message_metadata", lambda ctx: {"targetSpoke": "Olive"})
+    executor = HubExecutor(router=router, ttl_seconds=5, now=lambda: next(ticks))
+    asyncio.run(executor.execute(FakeContext(), None))
+    statuses = [m for kind, m in updater.events if kind == "status"]
+    assert statuses[0] == {"startedAt": "2026-10-07T12:00:00Z"}
+    assert statuses[-1] == {
+        "startedAt": "2026-10-07T12:00:00Z",
+        "lastHeartbeatAt": "2026-10-07T12:00:30Z",
+    }
+
+
+def test_liveness_summary_flags_long_running_after_ten_minutes():
+    from datetime import datetime, timezone
+
+    from hermes_hub.tools.peer_tools import liveness_summary
+
+    meta = {"startedAt": "2026-10-07T12:00:00Z", "lastHeartbeatAt": "2026-10-07T12:08:30Z"}
+    at_9 = liveness_summary(meta, now=datetime(2026, 10, 7, 12, 9, 0, tzinfo=timezone.utc))
+    at_11 = liveness_summary(meta, now=datetime(2026, 10, 7, 12, 11, 0, tzinfo=timezone.utc))
+    assert at_9 == {"elapsed_s": 540, "last_heard_s_ago": 30, "long_running": False}
+    assert at_11 == {"elapsed_s": 660, "last_heard_s_ago": 150, "long_running": True}
+
+
+def test_liveness_summary_without_metadata_is_empty():
+    from hermes_hub.tools.peer_tools import liveness_summary
+
+    assert liveness_summary({}) == {}
+
+
+class _FakeTaskClient:
+    def __init__(self, task):
+        self.task = task
+
+    async def get_task(self, task_id):
+        return self.task
+
+
+def test_peer_status_shows_liveness_while_working(monkeypatch):
+    import json
+
+    from hermes_hub.tools import peer_tools
+
+    task = {
+        "id": "t1",
+        "contextId": "c1",
+        "status": {"state": "TASK_STATE_WORKING"},
+        "metadata": {"startedAt": "2000-01-01T00:00:00Z"},
+    }
+    monkeypatch.setattr(peer_tools, "_client", lambda args: _FakeTaskClient(task))
+    out = json.loads(peer_tools.peer_status({"task_id": "t1"}))
+    assert out["state"] == "working"
+    assert out["long_running"] is True
+    assert out["elapsed_s"] > 600 and "last_heard_s_ago" in out
+
+
+def test_peer_status_returns_final_text_and_artifacts(monkeypatch):
+    import json
+
+    from hermes_hub.tools import peer_tools
+
+    task = {
+        "id": "t1",
+        "contextId": "c1",
+        "status": {"state": "TASK_STATE_COMPLETED", "message": {"parts": [{"text": "the answer"}]}},
+        "artifacts": [
+            {
+                "artifactId": "a1",
+                "name": "report.txt",
+                "parts": [{"text": "x"}],
+                "metadata": {"url": "http://h/a2a/artifacts/t1/a1", "sha256": "ab", "size_bytes": 3},
+            }
+        ],
+    }
+    monkeypatch.setattr(peer_tools, "_client", lambda args: _FakeTaskClient(task))
+    out = json.loads(peer_tools.peer_status({"task_id": "t1"}))
+    assert out["state"] == "completed" and out["text"] == "the answer"
+    assert out["artifacts"] == [
+        {
+            "artifact_id": "a1",
+            "name": "report.txt",
+            "url": "http://h/a2a/artifacts/t1/a1",
+            "sha256": "ab",
+            "size_bytes": 3,
+            "inline": False,
+            "task_id": "t1",
+        }
+    ]
+    assert "long_running" not in out

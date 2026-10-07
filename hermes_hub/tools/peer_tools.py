@@ -397,6 +397,40 @@ def peer_ask(args: Dict[str, Any], **_kwargs: Any) -> str:
     )
 
 
+#: peer_status flags a task as long-running past this age (D5).
+LONG_RUNNING_AFTER_S = 600
+
+
+def _parse_ts(value: Any):
+    from datetime import datetime
+
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def liveness_summary(metadata: Optional[Dict[str, Any]], now=None) -> Dict[str, Any]:
+    """Render hub liveness metadata (startedAt/lastHeartbeatAt) for a model:
+    elapsed seconds, seconds since the spoke was last heard, long_running."""
+    from datetime import datetime, timezone
+
+    metadata = metadata or {}
+    started = _parse_ts(metadata.get("startedAt"))
+    if started is None:
+        return {}
+    now = now or datetime.now(timezone.utc)
+    elapsed = int((now - started).total_seconds())
+    heard = _parse_ts(metadata.get("lastHeartbeatAt")) or started
+    return {
+        "elapsed_s": elapsed,
+        "last_heard_s_ago": int((now - heard).total_seconds()),
+        "long_running": elapsed >= LONG_RUNNING_AFTER_S,
+    }
+
+
 def peer_status(args: Dict[str, Any], **_kwargs: Any) -> str:
     """Check one task by id. Reads state only — W5 async is out of scope."""
     task_id = _arg(args, "task_id")
@@ -414,14 +448,30 @@ def peer_status(args: Dict[str, Any], **_kwargs: Any) -> str:
     message = status.get("message") or {}
     text = "".join(p.get("text", "") for p in message.get("parts", []) or [])
     state = str(status.get("state") or "")
-    return _ok(
-        task_id=str(task.get("id") or task_id),
+    # Strip the protobuf enum prefix: the model wants "completed", not
+    # "TASK_STATE_COMPLETED" (Task 1.2).
+    state = state[len("TASK_STATE_") :].lower() if state.startswith("TASK_STATE_") else state.lower()
+    resolved_id = str(task.get("id") or task_id)
+    from hermes_hub.hub_client import _artifact_from_event
+
+    artifacts = []
+    for raw_artifact in task.get("artifacts") or []:
+        summary = _artifact_from_event({"artifactUpdate": {"artifact": raw_artifact}})
+        if summary is not None:
+            summary["task_id"] = resolved_id
+            artifacts.append(summary)
+    payload: Dict[str, Any] = dict(
+        task_id=resolved_id,
         context_id=str(task.get("contextId") or task.get("context_id") or ""),
-        # Strip the protobuf enum prefix: the model wants "completed", not
-        # "TASK_STATE_COMPLETED" (Task 1.2).
-        state=state[len("TASK_STATE_") :].lower() if state.startswith("TASK_STATE_") else state.lower(),
+        state=state,
         text=text,
     )
+    if artifacts:
+        payload["artifacts"] = artifacts
+    if state in ("submitted", "working"):
+        # Phase 1.3: elapsed / last-heard / long_running (D5).
+        payload.update(liveness_summary(task.get("metadata")))
+    return _ok(**payload)
 
 
 def peer_fetch_artifact(args: Dict[str, Any], **_kwargs: Any) -> str:

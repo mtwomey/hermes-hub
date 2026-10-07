@@ -12,7 +12,8 @@ the external caller genuinely incremental (Gate 3).
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Mapping
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, Mapping
 
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
@@ -93,8 +94,10 @@ class HubExecutor(AgentExecutor):
         router: Router,
         ttl_seconds: float = 1800.0,
         timeout_seconds: float | None = None,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self.router = router
+        self._now = now or (lambda: datetime.now(timezone.utc))
         # ``timeout_seconds`` is the deprecated pre-Phase-1 name.
         self.ttl_seconds = float(timeout_seconds if timeout_seconds is not None else ttl_seconds)
 
@@ -102,9 +105,16 @@ class HubExecutor(AgentExecutor):
     def timeout_seconds(self) -> float:
         return self.ttl_seconds
 
+    def _stamp(self) -> str:
+        return self._now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         updater = await open_task(context, event_queue)
         await updater.start_work()
+        # Phase 1.3: liveness metadata, merged into task.metadata by the SDK's
+        # TaskManager so GetTask / peer_status can show elapsed + last-heard.
+        liveness: Dict[str, str] = {"startedAt": self._stamp()}
+        await updater.update_status(TaskState.TASK_STATE_WORKING, metadata=dict(liveness))
 
         metadata = message_metadata(context)
         spoke_name = str(metadata.get(META_TARGET_SPOKE) or metadata.get("target_spoke") or "")
@@ -142,7 +152,10 @@ class HubExecutor(AgentExecutor):
                     # TaskStatusUpdateEvent, published as soon as it's
                     # dispatched -- not batched -- so SSE forwards it
                     # immediately (Gate 3).
-                    await updater.update_status(TaskState.TASK_STATE_WORKING)
+                    liveness["lastHeartbeatAt"] = self._stamp()
+                    await updater.update_status(
+                        TaskState.TASK_STATE_WORKING, metadata=dict(liveness)
+                    )
                 elif frame_type == "task_artifact":
                     parts = [Part(text=str(frame.get("text") or ""))]
                     if frame.get("data"):
