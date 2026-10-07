@@ -27,7 +27,9 @@ result dict — see the leak-canary tests.
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import uuid
 import hashlib
 import json as jsonlib
 from pathlib import Path
@@ -40,12 +42,16 @@ from .caller_contract import META_SPOKE_CREDENTIAL, META_TARGET_SPOKE
 #: Every A2A HTTP request needs this header.
 A2A_VERSION_HEADER = {"A2A-Version": "1.0"}
 
-#: Client-side HTTP read timeout. Must exceed the hub's own per-task
-#: timeout_seconds (HubExecutor/Router, default 300s / HERMES_HUB_TASK_TIMEOUT_SECONDS)
-#: with headroom, or this client gives up before the hub even reports its own
-#: timeout -- reproducing the same "task failed with no diagnostic" illusion
-#: this constant exists to prevent. Keep >= hub task timeout + 30s buffer.
-DEFAULT_TIMEOUT_SECONDS = 330.0
+#: Per-HTTP-request timeout. Since Phase 1 (BEA-304) every call is short --
+#: SendMessage(returnImmediately) or GetTask -- so this is no longer coupled
+#: to how long a task runs (previously 330 s > the hub's 300 s timeout).
+DEFAULT_TIMEOUT_SECONDS = 30.0
+
+#: GetTask polling interval used by :meth:`HubClient.wait`.
+DEFAULT_POLL_SECONDS = 1.0
+
+#: How long ``ask`` waits client-side before returning ``state=working`` (D2).
+DEFAULT_WAIT_SECONDS = 270.0
 
 
 class HubClientError(RuntimeError):
@@ -104,28 +110,17 @@ class HubClient:
         except httpx.HTTPError as exc:
             raise HubClientError(f"hub is unreachable at {self.hub_url}: {exc}") from exc
 
-    async def ask(
+    def _build_message(
         self,
         spoke_name: str,
         text: str,
         *,
-        context_id: str = "",
-        credential: str = "",
-        file_name: str = "",
-        file_bytes: Optional[bytes] = None,
-        file_mime_type: str = "application/octet-stream",
+        context_id: str,
+        credential: str,
+        file_name: str,
+        file_bytes: Optional[bytes],
+        file_mime_type: str,
     ) -> Dict[str, Any]:
-        """Send a request to ``spoke_name`` through the hub and return its reply.
-
-        Returns a compact summary — ``text``, ``task_id``, ``context_id``,
-        and an ``artifacts`` list of id/name/sha256/url/size — never the raw
-        JSON-RPC/protobuf envelope (Task 1.2).
-
-        ``credential`` (V5a) travels in the message metadata under
-        ``spokeCredential``, exactly where ``hub_executor`` extracts it from,
-        and is omitted entirely when empty so a caller with nothing
-        configured produces the same request shape as before this existed.
-        """
         metadata: Dict[str, Any] = {META_TARGET_SPOKE: spoke_name}
         if credential:
             metadata[META_SPOKE_CREDENTIAL] = credential
@@ -141,99 +136,115 @@ class HubClient:
         message: Dict[str, Any] = {
             "role": "ROLE_USER",
             "parts": parts,
-            "messageId": f"hub-{abs(hash((spoke_name, text))) & 0xFFFFFFFF:x}",
+            "messageId": f"hub-{uuid.uuid4().hex}",
             "metadata": metadata,
         }
         if context_id:
             message["contextId"] = context_id
+        return message
+
+    async def submit(
+        self,
+        spoke_name: str,
+        text: str,
+        *,
+        context_id: str = "",
+        credential: str = "",
+        file_name: str = "",
+        file_bytes: Optional[bytes] = None,
+        file_mime_type: str = "application/octet-stream",
+    ) -> Dict[str, Any]:
+        """Phase 1.4: start a task without waiting for it (A2A ``SendMessage``
+        with ``configuration.returnImmediately=true``). The hub runs the task
+        to a terminal state regardless of this caller (D1); fetch it later
+        with :meth:`wait` / :meth:`get_task`. Returns ``task_id``,
+        ``context_id`` and ``state``.
+
+        ``credential`` (V5a) travels in the message metadata under
+        ``spokeCredential`` and is omitted entirely when empty.
+        """
+        message = self._build_message(
+            spoke_name,
+            text,
+            context_id=context_id,
+            credential=credential,
+            file_name=file_name,
+            file_bytes=file_bytes,
+            file_mime_type=file_mime_type,
+        )
         body = {
             "jsonrpc": "2.0",
             "id": 1,
-            "method": "SendStreamingMessage",
-            "params": {"message": message},
+            "method": "SendMessage",
+            "params": {"message": message, "configuration": {"returnImmediately": True}},
         }
-
-        final_text = ""
-        final_task_id = ""
-        final_context_id = context_id
-        failure: Optional[str] = None
-        artifacts: List[Dict[str, Any]] = []
-
-        try:
-            async with self._client() as client:
-                async with client.stream(
-                    "POST", "/a2a/v1", json=body, headers=self._headers()
-                ) as resp:
-                    if resp.status_code >= 400:
-                        raw = await resp.aread()
-                        raise HubClientError(
-                            f"{resp.status_code}: {raw.decode(errors='replace')}"
-                        )
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data:"):
-                            continue
-                        payload = jsonlib.loads(line[len("data:") :].strip())
-                        if "error" in payload:
-                            raise HubClientError(str(payload["error"]))
-                        result = payload.get("result", {})
-
-                        artifact = _artifact_from_event(result)
-                        if artifact is not None:
-                            artifacts.append(artifact)
-
-                        task = (
-                            result.get("task")
-                            or result.get("statusUpdate")
-                            or result.get("status_update")
-                        )
-                        if not task:
-                            continue
-                        final_task_id = (
-                            task.get("id") or task.get("taskId") or final_task_id
-                        )
-                        final_context_id = (
-                            task.get("contextId")
-                            or task.get("context_id")
-                            or final_context_id
-                        )
-                        status = task.get("status", {})
-                        state = status.get("state", "")
-                        message_out = status.get("message")
-                        rendered = ""
-                        if message_out:
-                            rendered = "".join(
-                                p.get("text", "") for p in message_out.get("parts", [])
-                            )
-                        if state == "TASK_STATE_COMPLETED":
-                            final_text = rendered or final_text
-                        elif state == "TASK_STATE_FAILED":
-                            failure = rendered or "task failed"
-        except HubClientError:
-            raise
-        except httpx.HTTPError as exc:
-            raise HubClientError(f"hub is unreachable at {self.hub_url}: {exc}") from exc
-
-        if failure is not None:
-            raise HubClientError(failure)
-
-        for artifact in artifacts:
-            artifact.setdefault("task_id", final_task_id)
-
+        payload = await self._rpc(body)
+        task = payload.get("task") or payload
         return {
-            "text": final_text,
-            "task_id": final_task_id,
-            "context_id": final_context_id,
-            "artifacts": artifacts,
+            "task_id": str(task.get("id") or ""),
+            "context_id": str(task.get("contextId") or context_id or ""),
+            "state": _short_state((task.get("status") or {}).get("state", "")),
         }
 
-    async def get_task(self, task_id: str) -> Dict[str, Any]:
-        """A2A ``GetTask``: read one task's current state by id."""
-        body = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "GetTask",
-            "params": {"id": task_id},
-        }
+    async def wait(
+        self,
+        task_id: str,
+        seconds: float = DEFAULT_WAIT_SECONDS,
+        *,
+        poll_interval: float = DEFAULT_POLL_SECONDS,
+    ) -> Dict[str, Any]:
+        """Poll ``GetTask`` until the task is terminal or ``seconds`` elapse.
+
+        Never raises because the deadline passed: returns the task summary
+        with ``state`` still ``working``/``submitted`` (D2)."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, float(seconds))
+        while True:
+            summary = summarize_task(await self.get_task(task_id), task_id)
+            if summary["state"] in TERMINAL_STATES:
+                return summary
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return summary
+            await asyncio.sleep(min(poll_interval, remaining))
+
+    async def ask(
+        self,
+        spoke_name: str,
+        text: str,
+        *,
+        context_id: str = "",
+        credential: str = "",
+        file_name: str = "",
+        file_bytes: Optional[bytes] = None,
+        file_mime_type: str = "application/octet-stream",
+        wait_seconds: float = DEFAULT_WAIT_SECONDS,
+    ) -> Dict[str, Any]:
+        """``submit`` + ``wait(wait_seconds)``.
+
+        Returns a compact summary — ``state``, ``text``, ``task_id``,
+        ``context_id``, ``elapsed_s`` and an ``artifacts`` list — never the raw
+        JSON-RPC/protobuf envelope (Task 1.2). If the task is still running
+        at the deadline, ``state`` is ``working`` (not an error); a FAILED
+        task raises :class:`HubClientError` with the hub's error text.
+        """
+        submitted = await self.submit(
+            spoke_name,
+            text,
+            context_id=context_id,
+            credential=credential,
+            file_name=file_name,
+            file_bytes=file_bytes,
+            file_mime_type=file_mime_type,
+        )
+        summary = await self.wait(submitted["task_id"], wait_seconds)
+        if not summary["context_id"]:
+            summary["context_id"] = submitted["context_id"]
+        if summary["state"] in FAILURE_STATES:
+            raise HubClientError(summary.get("error") or summary["text"] or "task failed")
+        return summary
+
+    async def _rpc(self, body: Dict[str, Any]) -> Dict[str, Any]:
         try:
             async with self._client() as client:
                 resp = await client.post("/a2a/v1", json=body, headers=self._headers())
@@ -244,6 +255,12 @@ class HubClient:
         if "error" in payload:
             raise HubClientError(str(payload["error"]))
         return payload.get("result", {})
+
+    async def get_task(self, task_id: str) -> Dict[str, Any]:
+        """A2A ``GetTask``: read one task's current state by id."""
+        return await self._rpc(
+            {"jsonrpc": "2.0", "id": 1, "method": "GetTask", "params": {"id": task_id}}
+        )
 
     async def download_artifact(
         self,
@@ -307,3 +324,55 @@ def _artifact_from_event(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "size_bytes": int(size or 0),
         "inline": inline_len > 0,
     }
+
+
+TERMINAL_STATES = ("completed", "failed", "canceled", "rejected")
+FAILURE_STATES = ("failed", "canceled", "rejected")
+
+
+def _short_state(state: Any) -> str:
+    state = str(state or "")
+    return state[len("TASK_STATE_") :].lower() if state.startswith("TASK_STATE_") else state.lower()
+
+
+def _elapsed_s(metadata: Dict[str, Any]) -> int:
+    from datetime import datetime, timezone
+
+    started = metadata.get("startedAt")
+    if not started:
+        return 0
+    try:
+        t0 = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    return max(0, int((datetime.now(timezone.utc) - t0).total_seconds()))
+
+
+def summarize_task(task: Dict[str, Any], task_id: str = "") -> Dict[str, Any]:
+    """Compact, model-safe view of an A2A Task (GetTask result): state, final
+    text, artifacts (metadata only, never bytes), hermesError on failure."""
+    status = task.get("status") or {}
+    message = status.get("message") or {}
+    text = "".join(p.get("text", "") for p in message.get("parts", []) or [])
+    state = _short_state(status.get("state"))
+    resolved_id = str(task.get("id") or task_id)
+    artifacts: List[Dict[str, Any]] = []
+    for raw_artifact in task.get("artifacts") or []:
+        summary = _artifact_from_event({"artifactUpdate": {"artifact": raw_artifact}})
+        if summary is not None:
+            summary["task_id"] = resolved_id
+            artifacts.append(summary)
+    out: Dict[str, Any] = {
+        "state": state,
+        "text": text if state == "completed" else "",
+        "task_id": resolved_id,
+        "context_id": str(task.get("contextId") or task.get("context_id") or ""),
+        "artifacts": artifacts,
+        "elapsed_s": _elapsed_s(task.get("metadata") or {}),
+    }
+    if state in FAILURE_STATES:
+        out["error"] = text or "task failed"
+        hermes_error = (message.get("metadata") or {}).get("hermesError")
+        if hermes_error:
+            out["hermes_error"] = str(hermes_error)
+    return out
