@@ -55,6 +55,53 @@ echo "$*" >> "$FAKE_STATE/hermes_calls"
 echo "Hermes Agent vTEST"
 """
 
+# Stand-ins for the Hermes modules the cleanup step imports (the real collector
+# must never run against a developer's real install from a test). Generations
+# listed in $FAKE_STATE/leased count as in use; FAKE_GC_FAIL makes it raise.
+STUB_MODULES = {
+    "hermes_cli/__init__.py": "",
+    "pm/__init__.py": "",
+    "pm/environments.py": """
+import json, os
+from pathlib import Path
+
+def install_state_dir(project_root):
+    return Path(os.environ["HERMES_HOME"]) / "installs" / "0123456789abcdef"
+
+def selected_venv(project_root):
+    facts = json.loads((install_state_dir(project_root) / "facts.json").read_text())
+    return Path(facts["packages"]["venv"]["environment"])
+""",
+    "pm/runtime.py": """
+def collect_runtime_generations(root):
+    return []
+""",
+    "hermes_cli/runtime_state.py": """
+import os, shutil
+from pathlib import Path
+from pm.environments import install_state_dir, selected_venv
+
+STATE = Path(os.environ["FAKE_STATE"])
+
+def leases_held(generation):
+    leased = (STATE / "leased").read_text().split() if (STATE / "leased").exists() else []
+    return generation.name in leased
+
+def collect_generations(project, *, min_age_seconds=86400):
+    with open(STATE / "gc_calls", "a") as f:
+        f.write(f"min_age={min_age_seconds}" + chr(10))
+    if os.environ.get("FAKE_GC_FAIL"):
+        raise OSError("simulated collector failure")
+    selected = selected_venv(project).parent.resolve()
+    removed = []
+    for g in (install_state_dir(project) / "environments").iterdir():
+        if g.resolve() != selected and not leases_held(g):
+            shutil.rmtree(g)
+            removed.append(g)
+    return removed
+""",
+}
+
 
 @pytest.fixture
 def rig(tmp_path):
@@ -68,6 +115,10 @@ def rig(tmp_path):
     for name, body in (("launchctl", FAKE_LAUNCHCTL), ("lsof", FAKE_LSOF), ("hermes", FAKE_HERMES)):
         (bins / name).write_text(body)
         (bins / name).chmod(0o755)
+    agent_root = tmp_path / "hermes-agent"
+    for rel, body in STUB_MODULES.items():
+        (agent_root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (agent_root / rel).write_text(body)
     ledger = tmp_path / "spoke_ledger.db"
     con = sqlite3.connect(ledger)
     con.execute("CREATE TABLE requests (task_id TEXT, context_id TEXT, caller TEXT, request TEXT, "
@@ -96,6 +147,15 @@ def rig(tmp_path):
             con.commit()
             con.close()
 
+        def generation(self, env_hash: str, *, leased: bool = False, size: int = 1024) -> Path:
+            g = inst / "environments" / env_hash
+            (g / "venv").mkdir(parents=True, exist_ok=True)
+            (g / "venv" / "blob").write_bytes(b"x" * size)
+            if leased:
+                with open(state / "leased", "a") as f:
+                    f.write(env_hash + "\n")
+            return g
+
         def calls(self, name: str = "calls") -> str:
             f = state / name
             return f.read_text() if f.exists() else ""
@@ -104,6 +164,7 @@ def rig(tmp_path):
             env = dict(os.environ)
             env.update({
                 "HERMES_HOME": str(home),
+                "HERMES_AGENT_ROOT": str(agent_root),
                 "HERMES_BIN": str(bins / "hermes"),
                 "HERMES_POST_UPDATE_PYTHON": sys.executable,
                 "HERMES_POST_UPDATE_SPOKE_LOG": str(state / "spoke.log"),
@@ -125,7 +186,7 @@ def rig(tmp_path):
 
 def test_help_lists_every_flag(rig):
     out = rig.run("--help").stdout
-    for flag in ("--update", "--watch", "--force", "--no-wait", "--wait", "--settle"):
+    for flag in ("--update", "--watch", "--force", "--no-wait", "--no-gc", "--wait", "--settle"):
         assert flag in out
 
 
@@ -266,3 +327,87 @@ def test_missing_facts_fails_loudly(rig):
     res = rig.run()
     assert res.returncode == 1
     assert "facts.json" in res.stderr
+
+
+# --- step 8: cleanup of old generations ---------------------------------------
+
+
+def test_cleanup_removes_unused_old_generation_and_keeps_leased_one(rig):
+    rig.select(NEW)
+    rig.spoke(1000, NEW)
+    selected = rig.generation(NEW)
+    unused = rig.generation(OLD, size=3 * 1048576)
+    leased = rig.generation("c" * 32, leased=True)
+    res = rig.run()
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert not unused.exists()
+    assert selected.exists() and leased.exists()
+    assert f"removed unused old generation {OLD} (3 MB)" in res.stdout
+    assert f"kept old generation {'c' * 32}: still in use" in res.stdout
+    # Hermes's 24 h minimum age is not applied; leases are the guard.
+    assert rig.calls("gc_calls").strip() == "min_age=0.0"
+
+
+def test_cleanup_runs_after_a_restart_too(rig):
+    rig.select(NEW)
+    rig.spoke(1000, OLD)
+    rig.generation(NEW)
+    old = rig.generation(OLD)
+    res = rig.run()
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "kickstart" in rig.calls()
+    assert not old.exists()
+
+
+def test_cleanup_never_invoked_when_only_selected_generation_exists(rig):
+    rig.select(NEW)
+    rig.spoke(1000, NEW)
+    rig.generation(NEW)
+    res = rig.run()
+    assert res.returncode == 0, res.stderr
+    assert rig.calls("gc_calls") == ""
+
+
+def test_no_gc_flag_leaves_old_generations(rig):
+    rig.select(NEW)
+    rig.spoke(1000, NEW)
+    rig.generation(NEW)
+    old = rig.generation(OLD)
+    res = rig.run("--no-gc")
+    assert res.returncode == 0, res.stderr
+    assert old.exists()
+    assert rig.calls("gc_calls") == ""
+
+
+def test_watch_mode_is_silent_about_generations_still_in_use(rig):
+    rig.select(NEW)
+    rig.spoke(1000, NEW)
+    rig.generation(NEW)
+    rig.generation(OLD, leased=True)
+    res = rig.run("--watch", "--settle", "0")
+    assert res.returncode == 0, res.stderr
+    assert res.stdout == "" and res.stderr == ""
+    assert (rig.tmp_path / "hermes_home" / "installs" / "0123456789abcdef" / "environments" / OLD).exists()
+
+
+def test_watch_mode_logs_a_removal(rig):
+    rig.select(NEW)
+    rig.spoke(1000, NEW)
+    rig.generation(NEW)
+    rig.generation(OLD)
+    res = rig.run("--watch", "--settle", "0")
+    assert res.returncode == 0, res.stderr
+    assert f"removed unused old generation {OLD}" in res.stdout
+
+
+def test_cleanup_failure_is_a_warning_not_a_failure(rig, monkeypatch):
+    monkeypatch.setenv("FAKE_GC_FAIL", "1")
+    rig.select(NEW)
+    rig.spoke(1000, NEW)
+    rig.generation(NEW)
+    old = rig.generation(OLD)
+    res = rig.run()
+    assert res.returncode == 0
+    assert "cleanup of old generations failed" in res.stderr
+    assert "simulated collector failure" in res.stderr
+    assert old.exists()
