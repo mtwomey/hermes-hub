@@ -553,6 +553,29 @@ def liveness_summary(metadata: Optional[Dict[str, Any]], now=None) -> Dict[str, 
     }
 
 
+def peer_cancel(args: Dict[str, Any], **_kwargs: Any) -> str:
+    """Phase 3.4: cancel a running peer task (A2A CancelTask). The hub tells
+    the spoke to interrupt its agent; the task ends ``canceled`` and the
+    caller's in-flight guard entry for it is cleared."""
+    task_id = _arg(args, "task_id")
+    if not task_id:
+        return _err("task_id is required")
+    try:
+        task = _run(_client(args).cancel_task(task_id))
+    except HubClientError as exc:
+        return _err(f"could not cancel task {task_id}: {exc}")
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(str(exc))
+    try:
+        inflight.clear_task(task_id)
+    except OSError:
+        pass
+    status = (task or {}).get("status") or {}
+    state = str(status.get("state") or "TASK_STATE_CANCELED")
+    state = state[len("TASK_STATE_") :].lower() if state.startswith("TASK_STATE_") else state.lower()
+    return _ok(task_id=task_id, state=state)
+
+
 def peer_status(args: Dict[str, Any], **_kwargs: Any) -> str:
     """Check one task by id. Reads state only — W5 async is out of scope."""
     task_id = _arg(args, "task_id")
@@ -788,6 +811,25 @@ PEER_WAIT_SCHEMA = {
     },
 }
 
+PEER_CANCEL_SCHEMA = {
+    "name": "peer_cancel",
+    "description": (
+        "Cancel a peer task that is still running (e.g. the request was wrong "
+        "or is no longer needed). The peer's agent is interrupted and the task "
+        "ends state=canceled; any later result is discarded. Fails if the task "
+        "already finished. Tasks also auto-cancel after the hub TTL (30 min)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "Task id from the peer_ask result."},
+            "peer_name": {"type": "string", "description": "Spoke name (informational)."},
+            "hub_url": _HUB_URL_PROPERTY,
+        },
+        "required": ["task_id"],
+    },
+}
+
 PEER_FETCH_ARTIFACT_SCHEMA = {
     "name": "peer_fetch_artifact",
     "description": (
@@ -839,6 +881,7 @@ TOOL_SPECS: List[ToolSpec] = [
     ToolSpec("peer_ask", PEER_ASK_SCHEMA, peer_ask),
     ToolSpec("peer_status", PEER_STATUS_SCHEMA, peer_status),
     ToolSpec("peer_wait", PEER_WAIT_SCHEMA, peer_wait),
+    ToolSpec("peer_cancel", PEER_CANCEL_SCHEMA, peer_cancel),
     ToolSpec("peer_fetch_artifact", PEER_FETCH_ARTIFACT_SCHEMA, peer_fetch_artifact),
 ]
 

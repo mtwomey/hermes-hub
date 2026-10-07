@@ -31,6 +31,7 @@ examples.
 | Cache a peer's skills locally | `peer_discover` | Same data, persisted |
 | "Ask Olive whether she can reach X" | `peer_ask` | Waits up to 270 s; returns her answer or `state=working` + `task_id` |
 | A `peer_ask` came back `state=working` | `peer_wait` | Same `task_id`; waits up to 270 s more. **Never re-send the request** |
+| The running request is wrong or no longer needed | `peer_cancel` | Same `task_id`; interrupts the peer's agent, task ends `canceled`. Tasks also auto-cancel after the hub TTL (30 min) |
 | Continue the same peer conversation | `peer_ask` + `context_id` | Reuse the id from the previous reply |
 | Send a local file to a peer | `peer_ask` + `file_path` | Arrives on the peer's disk before its turn |
 | Re-read an earlier task's outcome | `peer_status` | `task_id` from a `peer_ask` result |

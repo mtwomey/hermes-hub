@@ -274,6 +274,14 @@ class HubClient:
             {"jsonrpc": "2.0", "id": 1, "method": "GetTask", "params": {"id": task_id}}
         )
 
+    async def cancel_task(self, task_id: str) -> Dict[str, Any]:
+        """A2A ``CancelTask`` (Phase 3.4): the hub tells the spoke to
+        interrupt the agent and the task ends CANCELED. Raises
+        :class:`HubClientError` if the task is unknown or already final."""
+        return await self._rpc(
+            {"jsonrpc": "2.0", "id": 1, "method": "CancelTask", "params": {"id": task_id}}
+        )
+
     async def download_artifact(
         self,
         task_id: str,
