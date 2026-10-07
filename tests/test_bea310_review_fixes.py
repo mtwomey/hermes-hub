@@ -107,3 +107,17 @@ def test_prompt_makes_do_not_modify_requests_read_only():
     prompt = build_spoke_prompt(spoke_name="Olive", task_id="t", context_id="c")
     assert "strictly read-only" in prompt
     assert "skills" in prompt and "install" in prompt
+
+
+def test_hub_client_stamps_caller_name(monkeypatch):
+    from hermes_hub import hub_client
+
+    c = hub_client.HubClient(hub_url="http://hub")
+    kw = dict(context_id="", credential="", file_name="", file_bytes=None, file_mime_type="")
+    monkeypatch.setenv(hub_client.ENV_CALLER_NAME, "Olive-copilot")
+    assert c._build_message("Olive", "hi", **kw)["metadata"]["callerName"] == "Olive-copilot"
+    monkeypatch.delenv(hub_client.ENV_CALLER_NAME)
+    monkeypatch.setattr(hub_client.socket, "gethostname", lambda: "Pumpkin.local")
+    assert c._build_message("Olive", "hi", **kw)["metadata"]["callerName"] == "Pumpkin"
+    monkeypatch.setattr(hub_client.socket, "gethostname", lambda: "")
+    assert "callerName" not in c._build_message("Olive", "hi", **kw)["metadata"]
