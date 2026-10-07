@@ -42,6 +42,7 @@ from .protocol import (
     chunk_artifact_bytes,
     reassemble_artifact_chunks,
 )
+from .ledger import RequestLedger, caller_label, format_recent_requests
 from .sessions import SessionMap
 
 logger = logging.getLogger("hermes_hub.spoke_executor")
@@ -66,6 +67,7 @@ def build_spoke_prompt(
     context_id: str,
     output_dir: Optional[Path] = None,
     input_files: Optional[List[Path]] = None,
+    recent_requests: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """The ephemeral system prompt for a hub-routed turn (mirrors
     hermes-peer's ``build_executor_prompt``, trimmed to the hub context)."""
@@ -97,6 +99,9 @@ def build_spoke_prompt(
         "This conversation may continue over several turns; remember what "
         "you are told and refer back to it when asked.",
     ]
+    recent_block = format_recent_requests(list(recent_requests or []))
+    if recent_block:
+        lines += ["", recent_block]
     return "\n".join(lines)
 
 
@@ -109,6 +114,7 @@ def run_real_hermes_turn(
     spoke_name: str,
     output_dir: Optional[Path] = None,
     input_files: Optional[List[Path]] = None,
+    recent_requests: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Run one real Hermes agent turn, with explicit session history reload.
 
@@ -164,6 +170,7 @@ def run_real_hermes_turn(
             context_id=context_id,
             output_dir=output_dir,
             input_files=input_files,
+            recent_requests=recent_requests,
         ),
     )
     result = agent.run_conversation(text, conversation_history=conversation_history)
@@ -202,8 +209,12 @@ class SpokeExecutor:
         expected_credential: str = "",
         artifact_root: Optional[Path] = None,
         chunk_bytes: int = 262144,
+        ledger: Optional[RequestLedger] = None,
     ) -> None:
         self.spoke_name = spoke_name
+        #: Phase 2.4: recent-request ledger (None = disabled; the spoke CLI
+        #: wires the persistent one).
+        self.ledger = ledger
         self.send = send
         self.session_map = session_map or SessionMap()
         self.agent_runner = agent_runner
@@ -225,9 +236,11 @@ class SpokeExecutor:
             sig_params = inspect.signature(agent_runner).parameters
             self._agent_runner_accepts_output_dir = "output_dir" in sig_params
             self._agent_runner_accepts_input_files = "input_files" in sig_params
+            self._agent_runner_accepts_recent = "recent_requests" in sig_params
         except (TypeError, ValueError):
             self._agent_runner_accepts_output_dir = False
             self._agent_runner_accepts_input_files = False
+            self._agent_runner_accepts_recent = False
         #: (Task 2.5, W2) In-flight inbound-artifact reassembly buffers,
         #: keyed by task_id -> artifact_id -> {"begin": frame, "chunks": []}.
         #: Populated by handle_frame on artifact_begin/chunk/end received
@@ -312,6 +325,19 @@ class SpokeExecutor:
             runner_kwargs["output_dir"] = output_dir
         if self._agent_runner_accepts_input_files:
             runner_kwargs["input_files"] = input_files
+        caller = caller_label(frame.get("metadata"))
+        if self.ledger is not None:
+            try:
+                self.ledger.prune()
+                recent = self.ledger.recent(caller, exclude_task_id=task_id)
+                self.ledger.record_start(
+                    task_id=task_id, context_id=context_id, caller=caller, request=text
+                )
+            except Exception:  # noqa: BLE001 - ledger is advisory, never blocks work
+                logger.warning("task %s: request ledger unavailable", task_id, exc_info=True)
+                recent = []
+            if self._agent_runner_accepts_recent:
+                runner_kwargs["recent_requests"] = recent
 
         run_future = asyncio.ensure_future(
             asyncio.to_thread(self.agent_runner, **runner_kwargs)
@@ -327,9 +353,11 @@ class SpokeExecutor:
                 await self.send(build_task_status_frame(task_id=task_id))
             answer = run_future.result()
         except Exception as exc:  # noqa: BLE001 - surfaced to the hub as failed
+            self._ledger_end(task_id, "failed", str(exc))
             await self.send(build_task_failed_frame(task_id=task_id, error=str(exc)))
             shutil.rmtree(output_dir, ignore_errors=True)
             return
+        self._ledger_end(task_id, "completed", str(answer or ""))
 
         try:
             await self._emit_produced_artifacts(task_id=task_id, output_dir=output_dir)
@@ -337,6 +365,14 @@ class SpokeExecutor:
             shutil.rmtree(output_dir, ignore_errors=True)
 
         await self.send(build_task_complete_frame(task_id=task_id, text=answer))
+
+    def _ledger_end(self, task_id: str, state: str, answer: str) -> None:
+        if self.ledger is None:
+            return
+        try:
+            self.ledger.record_end(task_id=task_id, state=state, answer=answer)
+        except Exception:  # noqa: BLE001
+            logger.warning("task %s: request ledger update failed", task_id, exc_info=True)
 
     def _reassemble_inbound_files(self, *, task_id: str, output_dir: Path) -> List[Path]:
         """Reassemble any inbound artifact buffers for ``task_id`` (Task

@@ -265,3 +265,16 @@ def test_this_file_does_not_import_hermes_hub():
     src = Path(__file__).read_text()
     imports = [l for l in src.splitlines() if re.match(r"\s*(from|import)\s+hermes_hub", l)]
     assert imports == []
+
+
+def test_card_documents_message_id_dedup_and_duplicate_protection():
+    """Phase 2.5 (BEA-305, D7): messageId dedup + caller/spoke duplicate layers."""
+    with LiveHub(external_token=HUB_TOKEN) as hub:
+        params = _routing_extension(_get_card(hub.base_url, HUB_TOKEN))["params"]
+        dedup = params["deduplication"]
+        assert "messageId" in dedup["messageId"] and "existing task" in dedup["messageId"]
+        assert "retry" in dedup["messageId"]
+        assert "already_in_progress" in dedup["hermesPeerTools"]
+        assert "new_request" in dedup["hermesPeerTools"]
+        assert "recent requests" in dedup["spokeMemory"].lower()
+        assert "messageId" in params["methods"]["submitAndPoll"]

@@ -313,6 +313,7 @@ async def _connect(args: argparse.Namespace) -> int:
     from .credentials import resolve_spoke_credential
     from .sessions import SessionMap
     from .spoke_client import SpokeClient
+    from .ledger import RequestLedger
     from .spoke_executor import SpokeExecutor
 
     client_holder: Dict[str, Any] = {}
@@ -326,6 +327,8 @@ async def _connect(args: argparse.Namespace) -> int:
         send=send,
         session_map=SessionMap(),
         expected_credential=expected_credential,
+        # Phase 2.4: recent-request ledger (~/.hermes-hub/spoke_ledger.db).
+        ledger=RequestLedger(),
     )
 
     async def on_frame(frame: Dict[str, Any]) -> None:

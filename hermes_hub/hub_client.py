@@ -120,6 +120,7 @@ class HubClient:
         file_name: str,
         file_bytes: Optional[bytes],
         file_mime_type: str,
+        message_id: str = "",
     ) -> Dict[str, Any]:
         metadata: Dict[str, Any] = {META_TARGET_SPOKE: spoke_name}
         if credential:
@@ -136,7 +137,9 @@ class HubClient:
         message: Dict[str, Any] = {
             "role": "ROLE_USER",
             "parts": parts,
-            "messageId": f"hub-{uuid.uuid4().hex}",
+            # Phase 2.1: fresh per logical request; a transport retry passes
+            # the same id back so the hub attaches instead of re-dispatching.
+            "messageId": message_id or f"hub-{uuid.uuid4().hex}",
             "metadata": metadata,
         }
         if context_id:
@@ -153,6 +156,7 @@ class HubClient:
         file_name: str = "",
         file_bytes: Optional[bytes] = None,
         file_mime_type: str = "application/octet-stream",
+        message_id: str = "",
     ) -> Dict[str, Any]:
         """Phase 1.4: start a task without waiting for it (A2A ``SendMessage``
         with ``configuration.returnImmediately=true``). The hub runs the task
@@ -171,6 +175,7 @@ class HubClient:
             file_name=file_name,
             file_bytes=file_bytes,
             file_mime_type=file_mime_type,
+            message_id=message_id or f"hub-{uuid.uuid4().hex}",
         )
         body = {
             "jsonrpc": "2.0",
@@ -178,7 +183,14 @@ class HubClient:
             "method": "SendMessage",
             "params": {"message": message, "configuration": {"returnImmediately": True}},
         }
-        payload = await self._rpc(body)
+        try:
+            payload = await self._rpc(body)
+        except HubClientError as exc:
+            # One transport retry with the SAME messageId: if the first send
+            # reached the hub, this attaches to that task (no double run).
+            if "unreachable" not in str(exc):
+                raise
+            payload = await self._rpc(body)
         task = payload.get("task") or payload
         return {
             "task_id": str(task.get("id") or ""),

@@ -29,6 +29,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from .agent_card import build_hub_agent_card
+from .dedup import DedupRequestHandler, MessageIdIndex
 from .hub_executor import HubExecutor
 from .registry import SpokeRegistry
 from .router import Router
@@ -101,7 +102,11 @@ def build_hub_app(
     registry = registry or SpokeRegistry()
     router = router or Router(base_url=base_url)
 
-    executor = HubExecutor(router=router, ttl_seconds=task_timeout_seconds)
+    # Phase 2.1 (D4): messageId -> task dedup; remembered for >= the task TTL.
+    message_index = MessageIdIndex(ttl_seconds=max(3600.0, 2 * float(task_timeout_seconds)))
+    executor = HubExecutor(
+        router=router, ttl_seconds=task_timeout_seconds, message_index=message_index
+    )
     def _build_card():
         # ``router.base_url`` is authoritative when set: test harnesses bind
         # an ephemeral port after the app is built and update it there.
@@ -120,7 +125,8 @@ def build_hub_app(
         # snapshot taken at process startup.
         return _build_card()
 
-    handler = DefaultRequestHandler(
+    handler = DedupRequestHandler(
+        message_index=message_index,
         agent_executor=executor,
         task_store=InMemoryTaskStore(),
         agent_card=base_card,

@@ -51,6 +51,7 @@ from hermes_hub.credentials import (
     require_join_credential,
     require_spoke_credential,
 )
+from hermes_hub.ledger import RequestLedger
 from hermes_hub.sessions import SessionMap, SessionStore
 from hermes_hub.spoke_client import SpokeClient
 from hermes_hub.spoke_executor import SpokeExecutor
@@ -86,6 +87,8 @@ async def main(port: int, spoke_name: str) -> None:
         send=send,
         session_map=session_map,
         expected_credential=expected_credential,
+        # Phase 2.4 (BEA-305): recent-request ledger, spoke-local only.
+        ledger=RequestLedger(),
     )
 
     async def on_frame(frame):

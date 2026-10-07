@@ -123,6 +123,23 @@ real answer; no `timeout` failure anywhere in hub log.
    - **Spec item to close first:** confirm how the plugin obtains a stable
      caller-session id from Hermes tool kwargs (fallback: per-process id +
      context_id). Document the choice in this plan before coding.
+   - **CLOSED (BEA-305, verified against hermes-agent 1212a7f18ce):**
+     `model_tools._execute_tool` builds `dispatch_kwargs = {"task_id",
+     "session_id", "user_task"}` and `tools/registry.py dispatch()` passes them
+     as `handler(args, **kwargs)` after `_kwargs_accepted_by` signature
+     filtering. `peer_ask(args, **_kwargs)` already accepts `**kwargs`, so it
+     receives `session_id` (the Hermes conversation session id) and `task_id`
+     (subagent/terminal isolation id).
+     Caller-session key = `kwargs["session_id"]` when it is a non-empty str;
+     otherwise `"proc-<pid>-<boot uuid4>"` minted once per plugin process.
+     `task_id` is **not** used (it differs per subagent and is often None for
+     the main agent). Guard key = (caller-session key, peer name).
+     Known limits, accepted: (1) context compression rotates
+     `agent.session_id` (`agent/compression_facade.py`), so a compression
+     between two asks starts a new key and the guard misses — layer (b)
+     recipient memory and layer (c) messageId still apply; (2) the fallback
+     key spans all sessions in one process, so `new_request=true` is the
+     escape hatch. The same key drives 2.3 context_id reuse.
    - Tests: second ask during in-flight → guard result, no hub call; with
      `new_request=true` → sent; after completion → sent normally.
 

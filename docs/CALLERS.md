@@ -30,6 +30,7 @@ Paste this into the other agent's instructions:
 | ↳ `submit` / `poll` | Recommended long-task flow: `SendMessage` with `params.configuration = {"returnImmediately": true}` returns at once with `result.task` (SUBMITTED/WORKING); then `GetTask {"id": <taskId>}` every `intervalSeconds` until one of `terminalStates`. `result.metadata.startedAt` / `lastHeartbeatAt` show liveness |
 | ↳ `taskLifetime` | `ttlSeconds` (hub `HERMES_HUB_TASK_TTL_SECONDS`, default 1800; old `HERMES_HUB_TASK_TIMEOUT_SECONDS` is a deprecated alias). A task with no result by then ends FAILED with `hermesError=ttl_expired`. A caller disconnecting or giving up never fails a task; results stay in hub memory until the hub restarts |
 | ↳ `hermesErrors` | `status.message.metadata.hermesError` codes: `missing_target_spoke`, `spoke_unavailable`, `spoke_task_failed`, `spoke_disconnected`, `ttl_expired` (the pre-2026-10 `timeout` code no longer exists) |
+| ↳ `deduplication` | `messageId`: a `SendMessage` repeating a `message.messageId` the hub has already seen (kept for at least the task TTL) attaches to the existing task and returns it; the spoke is not asked again. Use a fresh `messageId` per logical request and reuse it only when retrying the HTTP call. `hermesPeerTools`: Hermes `peer_ask` returns `state=already_in_progress` (with the running `task_id`, nothing sent) while an earlier ask from the same session to the same spoke is still running; `new_request=true` overrides; the session's last `contextId` with that spoke is reused by default. `spokeMemory`: each spoke shows its agent the caller's last 2 h of requests (max 5; stored 24 h on the spoke only) so a rephrased duplicate is answered by referring to the earlier result. Optional `message.metadata.callerName` labels the caller |
 | `securitySchemes.bearerAuth` | Where the hub token is kept |
 | `skills[].description` | Which spoke owns the skill and how to address it |
 
@@ -67,7 +68,8 @@ curl -s --max-time 30 -H "Authorization: Bearer $TOKEN" -H 'A2A-Version: 1.0' \
   -H 'Content-Type: application/json' http://127.0.0.1:8770/a2a/v1 \
   -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"GetTask\",\"params\":{\"id\":\"$TASK_ID\"}}"
 # Repeat GetTask until status.state is terminal. Do NOT resend the SendMessage
-# to "retry" a slow task: it would start a second, duplicate task.
+# with a new messageId to "retry" a slow task: it would start a second task.
+# (Resending the SAME messageId is safe: the hub returns the existing task.)
 
 # Ask (blocking form, waits up to the task TTL; streaming form is SendStreamingMessage over SSE)
 curl -s --max-time 1830 -H "Authorization: Bearer $TOKEN" -H 'A2A-Version: 1.0' \

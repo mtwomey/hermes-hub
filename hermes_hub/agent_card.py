@@ -181,7 +181,9 @@ def caller_contract_params(
                 "(state SUBMITTED/WORKING); then GetTask {\"id\": taskId} until a "
                 "terminal state. The hub runs every task to completion whether or "
                 "not anyone is waiting; do NOT resend the request to 'retry' a slow "
-                "task -- poll the task id you already have."
+                "task -- poll the task id you already have. If you must retry the "
+                "HTTP call itself, resend the SAME messageId: the hub attaches it to "
+                "the existing task instead of running it twice."
             ),
             "result": (
                 "Find result.task or result.statusUpdate; when status.state is "
@@ -227,6 +229,28 @@ def caller_contract_params(
                 "ttl_expired. A caller disconnecting never fails a task."
             ),
             "resultRetention": "In hub memory until the hub restarts.",
+        },
+        "deduplication": {
+            "messageId": (
+                "A SendMessage whose message.messageId the hub has already seen "
+                "(within at least the task TTL) attaches to the existing task: the "
+                "response is that task, and the spoke is not asked again. Use a fresh "
+                "messageId per logical request and reuse it only on a transport retry."
+            ),
+            "hermesPeerTools": (
+                "Hermes callers using peer_ask also get an in-flight guard per "
+                "(caller session, spoke): a second peer_ask while the first is still "
+                "running returns state=already_in_progress with that task_id and sends "
+                "nothing; pass new_request=true only for a genuinely different request. "
+                "peer_ask reuses the session's last contextId with that spoke by default."
+            ),
+            "spokeMemory": (
+                "Each spoke shows its agent the caller's recent requests (last 2 h, up "
+                "to 5, kept 24 h on the spoke only) and asks it to refer to an earlier "
+                "result rather than redo a duplicate unless asked to redo it. Optional "
+                "message.metadata.callerName labels the caller; default is one shared "
+                "caller per spoke."
+            ),
         },
         "hermesErrors": {
             "missing_target_spoke": "message.metadata.targetSpoke was absent",
