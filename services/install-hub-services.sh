@@ -26,7 +26,7 @@ if [ -f "$HUB_CONFIG_FILE" ]; then
     while IFS='=' read -r key value || [ -n "$key" ]; do
         case "$key" in
             ""|\#*) continue ;;
-            SERVICE_MODE|HUB_BIND_HOST|SPOKE_HUB_HOST|HUB_HOST|HUB_PORT|HUB_PUBLIC_URL|HUB_TASK_TIMEOUT_SECONDS|SPOKE_NAME)
+            SERVICE_MODE|HUB_BIND_HOST|SPOKE_HUB_HOST|HUB_HOST|HUB_PORT|HUB_PUBLIC_URL|HUB_TASK_TTL_SECONDS|HUB_TASK_TIMEOUT_SECONDS|SPOKE_NAME)
                 printf -v "CONFIG_${key}" '%s' "$value"
                 ;;
             *)
@@ -56,7 +56,12 @@ if [ -z "$HUB_PUBLIC_URL" ]; then
         *) HUB_PUBLIC_URL="http://${HUB_BIND_HOST}:${HUB_PORT}" ;;
     esac
 fi
-HUB_TASK_TIMEOUT_SECONDS="${HUB_TASK_TIMEOUT_SECONDS:-${CONFIG_HUB_TASK_TIMEOUT_SECONDS:-300}}"
+# Hard task TTL (BEA-304). HUB_TASK_TIMEOUT_SECONDS is a deprecated alias.
+LEGACY_TIMEOUT="${HUB_TASK_TIMEOUT_SECONDS:-${CONFIG_HUB_TASK_TIMEOUT_SECONDS:-}}"
+if [ -z "${HUB_TASK_TTL_SECONDS:-${CONFIG_HUB_TASK_TTL_SECONDS:-}}" ] && [ -n "$LEGACY_TIMEOUT" ]; then
+    echo "WARNING: HUB_TASK_TIMEOUT_SECONDS is deprecated; using it as HUB_TASK_TTL_SECONDS=$LEGACY_TIMEOUT (default 1800)" >&2
+fi
+HUB_TASK_TTL_SECONDS="${HUB_TASK_TTL_SECONDS:-${CONFIG_HUB_TASK_TTL_SECONDS:-${LEGACY_TIMEOUT:-1800}}}"
 SPOKE_NAME="${SPOKE_NAME:-${CONFIG_SPOKE_NAME:-Pumpkin}}"
 SERVICE_MODE="${SERVICE_MODE:-${CONFIG_SERVICE_MODE:-both}}"
 case "$SERVICE_MODE" in hub|spoke|both) ;; *) echo "SERVICE_MODE must be hub, spoke, or both" >&2; exit 2 ;; esac
@@ -117,7 +122,7 @@ render_template() {
         -e "s#__SPOKE_HUB_HOST__#$SPOKE_HUB_HOST#g" \
         -e "s#__HUB_PORT__#$HUB_PORT#g" \
         -e "s#__HUB_PUBLIC_URL__#$HUB_PUBLIC_URL#g" \
-        -e "s#__HUB_TASK_TIMEOUT_SECONDS__#$HUB_TASK_TIMEOUT_SECONDS#g" \
+        -e "s#__HUB_TASK_TTL_SECONDS__#$HUB_TASK_TTL_SECONDS#g" \
         -e "s#__SPOKE_NAME__#$SPOKE_NAME#g" \
         -e "s#__LOG_DIR__#$LOG_DIR#g" \
         "$template" > "$out"
@@ -251,7 +256,7 @@ show_help() {
     echo ""
     echo "Never touches ai.hermes.gateway. Env overrides: HOMES_DIR, LOG_DIR,"
     echo "HUB_VENV, HERMES_AGENT_VENV, SERVICE_MODE, HUB_BIND_HOST, SPOKE_HUB_HOST,"
-    echo "HUB_PORT, HUB_PUBLIC_URL, HUB_TASK_TIMEOUT_SECONDS, SPOKE_NAME, LAUNCH_AGENTS_DIR."
+    echo "HUB_PORT, HUB_PUBLIC_URL, HUB_TASK_TTL_SECONDS, SPOKE_NAME, LAUNCH_AGENTS_DIR."
 }
 
 case "${1:-status}" in

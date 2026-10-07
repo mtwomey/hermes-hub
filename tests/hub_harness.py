@@ -53,8 +53,11 @@ class FakeSpokeConnection:
         reply: Callable[[Dict[str, Any]], str] | str = "ok",
         expected_credential: str = "",
         artifact: Optional[Dict[str, Any]] = None,
+        delay: float = 0.0,
     ) -> None:
         self.router = router
+        #: Seconds to "work" before completing (slow-spoke tests, Phase 1).
+        self.delay = delay
         self.name = name
         self.reply = reply
         self.expected_credential = expected_credential
@@ -129,6 +132,8 @@ class FakeSpokeConnection:
                         "text": "",
                     }
                 )
+        if self.delay:
+            await asyncio.sleep(self.delay)
         text = self.reply(frame) if callable(self.reply) else self.reply
         await self.router.dispatch_frame_from_spoke(
             build_task_complete_frame(task_id=task_id, text=text)
@@ -215,6 +220,7 @@ class LiveHub:
         reply: Callable[[Dict[str, Any]], str] | str = "ok",
         expected_credential: str = "",
         artifact: Optional[Dict[str, Any]] = None,
+        delay: float = 0.0,
     ) -> FakeSpokeConnection:
         self.registry.register(name=name, skills=list(skills or []))
         conn = FakeSpokeConnection(
@@ -223,6 +229,7 @@ class LiveHub:
             reply=reply,
             expected_credential=expected_credential,
             artifact=artifact,
+            delay=delay,
         )
         self.router.register_connection(name, conn)
         self.connections[name] = conn

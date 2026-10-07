@@ -27,6 +27,9 @@ Paste this into the other agent's instructions:
 | ↳ `requiredHeaders` | `Authorization: Bearer <hub token>`, `A2A-Version: 1.0`, `Content-Type: application/json`. Without `A2A-Version` the hub returns JSON-RPC error -32009 |
 | ↳ `localRpcUrl` / `urlNote` | `rpcUrl` is the advertised LAN address; on this Mac the loopback `localRpcUrl` hits the same endpoint |
 | ↳ `errors` | HTTP 401 vs JSON-RPC `error` vs `TASK_STATE_FAILED` |
+| ↳ `submit` / `poll` | Recommended long-task flow: `SendMessage` with `params.configuration = {"returnImmediately": true}` returns at once with `result.task` (SUBMITTED/WORKING); then `GetTask {"id": <taskId>}` every `intervalSeconds` until one of `terminalStates`. `result.metadata.startedAt` / `lastHeartbeatAt` show liveness |
+| ↳ `taskLifetime` | `ttlSeconds` (hub `HERMES_HUB_TASK_TTL_SECONDS`, default 1800; old `HERMES_HUB_TASK_TIMEOUT_SECONDS` is a deprecated alias). A task with no result by then ends FAILED with `hermesError=ttl_expired`. A caller disconnecting or giving up never fails a task; results stay in hub memory until the hub restarts |
+| ↳ `hermesErrors` | `status.message.metadata.hermesError` codes: `missing_target_spoke`, `spoke_unavailable`, `spoke_task_failed`, `spoke_disconnected`, `ttl_expired` (the pre-2026-10 `timeout` code no longer exists) |
 | `securitySchemes.bearerAuth` | Where the hub token is kept |
 | `skills[].description` | Which spoke owns the skill and how to address it |
 
@@ -55,8 +58,19 @@ CRED="$(security find-generic-password -s hermes-hub -a 'caller:Olive:credential
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8770/.well-known/agent-card.json \
   | python3 -c 'import json,sys;c=json.load(sys.stdin);print([e["params"]["connectedSpokes"] for e in c["capabilities"]["extensions"] if e["required"]][0])'
 
-# Ask (blocking form; the streaming form is SendStreamingMessage over SSE)
-curl -s --max-time 330 -H "Authorization: Bearer $TOKEN" -H 'A2A-Version: 1.0' \
+# Submit without waiting (recommended); prints the task id. Then poll GetTask.
+TASK_ID="$(curl -s --max-time 30 -H "Authorization: Bearer $TOKEN" -H 'A2A-Version: 1.0' \
+  -H 'Content-Type: application/json' http://127.0.0.1:8770/a2a/v1 \
+  -d "$(python3 -c 'import json,sys,uuid;print(json.dumps({"jsonrpc":"2.0","id":"1","method":"SendMessage","params":{"configuration":{"returnImmediately":True},"message":{"role":"ROLE_USER","messageId":str(uuid.uuid4()),"parts":[{"text":sys.argv[1]}],"metadata":{"targetSpoke":"Olive","spokeCredential":sys.argv[2]}}}}))' 'What is your hostname?' "$CRED")" \
+  | python3 -c 'import json,sys;print(json.load(sys.stdin)["result"]["task"]["id"])')"
+curl -s --max-time 30 -H "Authorization: Bearer $TOKEN" -H 'A2A-Version: 1.0' \
+  -H 'Content-Type: application/json' http://127.0.0.1:8770/a2a/v1 \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"GetTask\",\"params\":{\"id\":\"$TASK_ID\"}}"
+# Repeat GetTask until status.state is terminal. Do NOT resend the SendMessage
+# to "retry" a slow task: it would start a second, duplicate task.
+
+# Ask (blocking form, waits up to the task TTL; streaming form is SendStreamingMessage over SSE)
+curl -s --max-time 1830 -H "Authorization: Bearer $TOKEN" -H 'A2A-Version: 1.0' \
   -H 'Content-Type: application/json' http://127.0.0.1:8770/a2a/v1 \
   -d "$(python3 -c 'import json,sys,uuid;print(json.dumps({"jsonrpc":"2.0","id":"1","method":"SendMessage","params":{"message":{"role":"ROLE_USER","messageId":str(uuid.uuid4()),"parts":[{"text":sys.argv[1]}],"metadata":{"targetSpoke":"Olive","spokeCredential":sys.argv[2]}}}}))' 'What is your hostname?' "$CRED")"
 ```

@@ -1,6 +1,6 @@
 # hermes-hub-peer — native Hermes plugin
 
-Registers the six `peer_*` model tools so a normal Hermes conversation can
+Registers the seven `peer_*` model tools so a normal Hermes conversation can
 reach Hermes agents on other machines through a [hermes-hub](../../README.md)
 instance.
 
@@ -10,7 +10,8 @@ instance.
 | `peer_info` | One spoke's identity and full skill list |
 | `peer_discover` | Refresh a spoke's skills and cache them locally |
 | `peer_ask` | Send a request to a named spoke and return its reply |
-| `peer_status` | Read one task by id |
+| `peer_status` | Read one task by id (no wait) |
+| `peer_wait` | Keep waiting (<=270 s) on a `state=working` task |
 | `peer_fetch_artifact` | Download an artifact a spoke produced, SHA-256 verified |
 
 ## What this plugin does NOT do
@@ -82,7 +83,7 @@ Example `~/.hermes-hub/config.json`:
 }
 ```
 
-**`check_fn`:** the six tools are hidden from the model unless
+**`check_fn`:** the seven tools are hidden from the model unless
 `HERMES_HUB_URL` or `hub_url` is set. Setting neither leaves the toolset
 invisible, which is the intended "not configured" state.
 

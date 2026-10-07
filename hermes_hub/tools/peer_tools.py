@@ -383,18 +383,111 @@ def peer_ask(args: Dict[str, Any], **_kwargs: Any) -> str:
                 credential=credential,
                 file_name=file_name,
                 file_bytes=file_bytes,
+                wait_seconds=PEER_ASK_WAIT_SECONDS,
             )
         )
     except HubClientError as exc:
         return _err(str(exc))
     except Exception as exc:  # pragma: no cover - defensive
         return _err(str(exc))
-    return _ok(
-        text=result["text"],
-        task_id=result["task_id"],
-        context_id=result["context_id"],
-        artifacts=result["artifacts"],
+    return _task_result(result, peer_name=peer_name)
+
+
+def still_running_instruction(peer_name: str, task_id: str) -> str:
+    where = peer_name or "the peer"
+    return (
+        f"Still running on {where}. Do NOT send this request again -- the peer "
+        f"is already working on it and a repeat would redo the work. Call "
+        f"peer_wait(task_id=\"{task_id}\") to keep waiting (up to 270 s per call), "
+        f"or peer_status(task_id=\"{task_id}\") to check progress."
     )
+
+
+def _task_result(result: Dict[str, Any], *, peer_name: str = "") -> str:
+    """Model-facing view of a HubClient task summary (ask/wait)."""
+    state = result.get("state") or ""
+    if state in ("failed", "canceled", "rejected"):
+        payload = {
+            "success": False,
+            "error": result.get("error") or "task failed",
+            "state": state,
+            "task_id": result.get("task_id", ""),
+        }
+        if result.get("hermes_error"):
+            payload["hermes_error"] = result["hermes_error"]
+        return json.dumps(payload, ensure_ascii=False)
+    out: Dict[str, Any] = dict(
+        state=state,
+        text=result.get("text", ""),
+        task_id=result.get("task_id", ""),
+        context_id=result.get("context_id", ""),
+        artifacts=result.get("artifacts", []),
+    )
+    if state != "completed":
+        out["elapsed_s"] = int(result.get("elapsed_s") or 0)
+        out["instruction"] = still_running_instruction(peer_name, out["task_id"])
+    return _ok(**out)
+
+
+def clamp_wait_seconds(value: Any) -> float:
+    try:
+        seconds = float(value) if value not in (None, "") else MAX_WAIT_SECONDS
+    except (TypeError, ValueError):
+        seconds = MAX_WAIT_SECONDS
+    return max(0.0, min(MAX_WAIT_SECONDS, seconds))
+
+
+def peer_wait(args: Dict[str, Any], **_kwargs: Any) -> str:
+    """Phase 1.5: keep waiting (<= 270 s) on a task from an earlier peer_ask."""
+    task_id = _arg(args, "task_id")
+    if not task_id:
+        return _err("task_id is required")
+    try:
+        result = _run(_client(args).wait(task_id, clamp_wait_seconds(args.get("seconds"))))
+    except HubClientError as exc:
+        return _err(str(exc))
+    except Exception as exc:  # pragma: no cover - defensive
+        return _err(str(exc))
+    return _task_result(result, peer_name=_arg(args, "peer_name"))
+
+
+#: Hard cap for peer_wait and peer_ask's client-side wait (D2): below
+#: typical tool-call/HTTP ceilings so the caller's turn never hangs.
+MAX_WAIT_SECONDS = 270.0
+PEER_ASK_WAIT_SECONDS = MAX_WAIT_SECONDS
+
+#: peer_status flags a task as long-running past this age (D5).
+LONG_RUNNING_AFTER_S = 600
+
+
+def _parse_ts(value: Any):
+    from datetime import datetime
+
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def liveness_summary(metadata: Optional[Dict[str, Any]], now=None) -> Dict[str, Any]:
+    """Render hub liveness metadata (startedAt/lastHeartbeatAt) for a model:
+    elapsed seconds, seconds since the spoke was last heard, long_running."""
+    from datetime import datetime, timezone
+
+    metadata = metadata or {}
+    started = _parse_ts(metadata.get("startedAt"))
+    if started is None:
+        return {}
+    now = now or datetime.now(timezone.utc)
+    elapsed = int((now - started).total_seconds())
+    heard = _parse_ts(metadata.get("lastHeartbeatAt")) or started
+    return {
+        "elapsed_s": elapsed,
+        "last_heard_s_ago": int((now - heard).total_seconds()),
+        "long_running": elapsed >= LONG_RUNNING_AFTER_S,
+    }
 
 
 def peer_status(args: Dict[str, Any], **_kwargs: Any) -> str:
@@ -414,14 +507,30 @@ def peer_status(args: Dict[str, Any], **_kwargs: Any) -> str:
     message = status.get("message") or {}
     text = "".join(p.get("text", "") for p in message.get("parts", []) or [])
     state = str(status.get("state") or "")
-    return _ok(
-        task_id=str(task.get("id") or task_id),
+    # Strip the protobuf enum prefix: the model wants "completed", not
+    # "TASK_STATE_COMPLETED" (Task 1.2).
+    state = state[len("TASK_STATE_") :].lower() if state.startswith("TASK_STATE_") else state.lower()
+    resolved_id = str(task.get("id") or task_id)
+    from hermes_hub.hub_client import _artifact_from_event
+
+    artifacts = []
+    for raw_artifact in task.get("artifacts") or []:
+        summary = _artifact_from_event({"artifactUpdate": {"artifact": raw_artifact}})
+        if summary is not None:
+            summary["task_id"] = resolved_id
+            artifacts.append(summary)
+    payload: Dict[str, Any] = dict(
+        task_id=resolved_id,
         context_id=str(task.get("contextId") or task.get("context_id") or ""),
-        # Strip the protobuf enum prefix: the model wants "completed", not
-        # "TASK_STATE_COMPLETED" (Task 1.2).
-        state=state[len("TASK_STATE_") :].lower() if state.startswith("TASK_STATE_") else state.lower(),
+        state=state,
         text=text,
     )
+    if artifacts:
+        payload["artifacts"] = artifacts
+    if state in ("submitted", "working"):
+        # Phase 1.3: elapsed / last-heard / long_running (D5).
+        payload.update(liveness_summary(task.get("metadata")))
+    return _ok(**payload)
 
 
 def peer_fetch_artifact(args: Dict[str, Any], **_kwargs: Any) -> str:
@@ -525,8 +634,11 @@ PEER_ASK_SCHEMA = {
         "Ask a named peer machine to do something and return its answer. The "
         "peer runs a full Hermes agent turn with its own tools and local "
         "access, so this is how you reach a file, service, or network that "
-        "only that machine can see. Runs synchronously; returns the peer's "
-        "final text plus ids for any files it produced."
+        "only that machine can see. Waits up to ~4.5 min (270 s); returns the "
+        "peer's final text plus ids for any files it produced. If the peer is "
+        "still working at that point the result has state=working and a "
+        "task_id: the request is NOT lost and keeps running. Do NOT send the "
+        "same request again -- call peer_wait(task_id) or peer_status(task_id)."
     ),
     "parameters": {
         "type": "object",
@@ -560,13 +672,40 @@ PEER_ASK_SCHEMA = {
 PEER_STATUS_SCHEMA = {
     "name": "peer_status",
     "description": (
-        "Look up one peer task by id and report its state and final text. "
-        "Use to re-read the outcome of an earlier peer_ask."
+        "Look up one peer task by id without waiting: state, final text and "
+        "artifacts when completed; elapsed_s, last_heard_s_ago and "
+        "long_running (10 min+) while still working. Use to re-read the "
+        "outcome of an earlier peer_ask."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "task_id": {"type": "string", "description": "Task id from a peer_ask result."},
+            "peer_name": {"type": "string", "description": "Spoke name (informational)."},
+            "hub_url": _HUB_URL_PROPERTY,
+        },
+        "required": ["task_id"],
+    },
+}
+
+PEER_WAIT_SCHEMA = {
+    "name": "peer_wait",
+    "description": (
+        "Keep waiting for a peer task that an earlier peer_ask returned as "
+        "state=working. Blocks up to `seconds` (max 270) and returns the final "
+        "text when it finishes, or state=working again if it is still running. "
+        "Use this instead of re-sending the request."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "Task id from the peer_ask result."},
+            "seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 270,
+                "description": "How long to wait (default and max 270).",
+            },
             "peer_name": {"type": "string", "description": "Spoke name (informational)."},
             "hub_url": _HUB_URL_PROPERTY,
         },
@@ -624,6 +763,7 @@ TOOL_SPECS: List[ToolSpec] = [
     ToolSpec("peer_discover", PEER_DISCOVER_SCHEMA, peer_discover),
     ToolSpec("peer_ask", PEER_ASK_SCHEMA, peer_ask),
     ToolSpec("peer_status", PEER_STATUS_SCHEMA, peer_status),
+    ToolSpec("peer_wait", PEER_WAIT_SCHEMA, peer_wait),
     ToolSpec("peer_fetch_artifact", PEER_FETCH_ARTIFACT_SCHEMA, peer_fetch_artifact),
 ]
 

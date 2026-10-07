@@ -1,6 +1,6 @@
 """Tests for the native Hermes plugin packaging (W3 M2).
 
-The plugin lives in ``plugin/hermes_hub_peer/`` and registers the six
+The plugin lives in ``plugin/hermes_hub_peer/`` and registers the seven
 ``peer_*`` tools through ``PluginContext.register_tool()``. Hermes core is
 never patched and no ``.pth`` file is written — that was hermes-peer's
 approach and it is obsolete here.
@@ -30,6 +30,7 @@ EXPECTED_TOOLS = [
     "peer_discover",
     "peer_ask",
     "peer_status",
+    "peer_wait",
     "peer_fetch_artifact",
 ]
 
@@ -155,7 +156,7 @@ def test_readme_documents_install_uninstall_and_config():
 # -- registration ------------------------------------------------------------
 
 
-def test_register_registers_all_six_tools_via_the_plugin_api():
+def test_register_registers_all_seven_tools_via_the_plugin_api():
     ctx = FakePluginContext()
     load_plugin_module().register(ctx)
     assert sorted(ctx.tools) == sorted(EXPECTED_TOOLS)
@@ -273,7 +274,7 @@ def test_registration_performs_no_network_io(monkeypatch):
     monkeypatch.setattr(socket, "create_connection", explode)
     ctx = FakePluginContext()
     load_plugin_module().register(ctx)
-    assert len(ctx.tools) == 6
+    assert len(ctx.tools) == len(EXPECTED_TOOLS) == 7
 
 
 def test_any_bundled_skill_is_static_and_names_no_specific_peer():

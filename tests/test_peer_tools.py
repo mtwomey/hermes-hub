@@ -39,6 +39,7 @@ def test_all_six_tool_names_are_exported_with_schemas():
         "peer_discover",
         "peer_ask",
         "peer_status",
+        "peer_wait",
         "peer_fetch_artifact",
     ]
     for spec in peer_tools.TOOL_SPECS:

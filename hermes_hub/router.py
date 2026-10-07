@@ -11,9 +11,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from typing import Any, AsyncIterator, Dict, Optional, Protocol
 
 from . import artifacts
+logger = logging.getLogger(__name__)
+
+#: hermesError code for a task whose spoke WebSocket dropped mid-task.
+SPOKE_DISCONNECTED = "spoke_disconnected"
+
 from .protocol import (
     FRAME_ARTIFACT_BEGIN,
     FRAME_ARTIFACT_CHUNK,
@@ -35,6 +41,12 @@ class SpokeUnavailableError(Exception):
 
     H10: the hub does not queue for an offline spoke; it fails fast.
     """
+
+
+class TaskTTLExpired(TimeoutError):
+    """Raised when a routed task reaches its hard TTL (Phase 1, D5) without a
+    terminal frame. Distinct from a caller giving up: the hub never fails a
+    task merely because nobody is waiting for it."""
 
 
 class SpokeConnection(Protocol):
@@ -59,6 +71,11 @@ class Router:
         # that task; populated by dispatch_frame_from_spoke, drained by
         # route_task's async generator.
         self._task_queues: Dict[str, "asyncio.Queue[Dict[str, Any]]"] = {}
+        # task_id -> spoke name, so a spoke disconnect can fail its in-flight
+        # tasks promptly instead of leaving them to the TTL.
+        self._task_spokes: Dict[str, str] = {}
+        #: Frames that arrived for a task_id with no live route (logged, Phase 1.2).
+        self.late_frame_count = 0
         #: Base URL used to build download links for reassembled artifacts
         #: (Task 2.4). The hub serves these under
         #: ``artifacts.ARTIFACT_DOWNLOAD_PATH``.
@@ -69,6 +86,18 @@ class Router:
 
     def unregister_connection(self, spoke_name: str) -> None:
         self._connections.pop(spoke_name, None)
+        for task_id, owner in list(self._task_spokes.items()):
+            if owner != spoke_name:
+                continue
+            queue = self._task_queues.get(task_id)
+            if queue is None:
+                continue
+            frame = build_task_failed_frame(
+                task_id=task_id,
+                error=f"spoke '{spoke_name}' disconnected before the task finished",
+            )
+            frame["hermes_error"] = SPOKE_DISCONNECTED
+            queue.put_nowait(frame)
 
     def is_available(self, spoke_name: str) -> bool:
         return spoke_name in self._connections
@@ -83,6 +112,14 @@ class Router:
         queue = self._task_queues.get(task_id)
         if queue is not None:
             await queue.put(frame)
+            return
+        # Phase 1.2: never drop silently. Log id + type only (no payload).
+        self.late_frame_count += 1
+        logger.warning(
+            "late frame for unknown task_id=%s type=%s (no live route; dropped)",
+            task_id,
+            frame.get("type"),
+        )
 
     async def route_task(
         self,
@@ -94,10 +131,13 @@ class Router:
         metadata: Optional[Dict[str, Any]] = None,
         credential: str = "",
         inbound_file: Optional[Dict[str, Any]] = None,
-        timeout_seconds: float = 300.0,
+        ttl_seconds: float = 1800.0,
+        timeout_seconds: Optional[float] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """Send a task to ``spoke_name`` and yield every frame it emits, in
-        arrival order, until a terminal frame (complete/failed) or timeout.
+        arrival order, until a terminal frame (complete/failed) or the hard
+        TTL (raises :class:`TaskTTLExpired`). ``timeout_seconds`` is a
+        deprecated alias for ``ttl_seconds``.
 
         Raises :class:`SpokeUnavailableError` immediately (H10, no queueing)
         if the spoke is not currently connected.
@@ -112,8 +152,11 @@ class Router:
         if connection is None:
             raise SpokeUnavailableError(f"spoke '{spoke_name}' is not currently connected")
 
+        if timeout_seconds is not None:
+            ttl_seconds = timeout_seconds
         queue: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue()
         self._task_queues[task_id] = queue
+        self._task_spokes[task_id] = spoke_name
         # In-flight artifact reassembly buffers, keyed by artifact_id.
         # Populated on artifact_begin, appended to on artifact_chunk,
         # flushed (verified + stored + synthesized into a task_artifact
@@ -134,12 +177,17 @@ class Router:
                     credential=credential,
                 )
             )
-            deadline = asyncio.get_event_loop().time() + timeout_seconds
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + ttl_seconds
+            ttl_message = f"task {task_id} on spoke {spoke_name} reached its {ttl_seconds:g}s TTL"
             while True:
-                remaining = deadline - asyncio.get_event_loop().time()
+                remaining = deadline - loop.time()
                 if remaining <= 0:
-                    raise TimeoutError(f"task {task_id} on spoke {spoke_name} timed out")
-                frame = await asyncio.wait_for(queue.get(), timeout=remaining)
+                    raise TaskTTLExpired(ttl_message)
+                try:
+                    frame = await asyncio.wait_for(queue.get(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    raise TaskTTLExpired(ttl_message) from None
                 frame_type = frame.get("type")
 
                 if frame_type == FRAME_ARTIFACT_BEGIN:
@@ -233,6 +281,7 @@ class Router:
                     return
         finally:
             self._task_queues.pop(task_id, None)
+            self._task_spokes.pop(task_id, None)
 
     async def _send_inbound_file(
         self, connection: SpokeConnection, *, task_id: str, inbound_file: Dict[str, Any]
