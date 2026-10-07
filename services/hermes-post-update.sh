@@ -26,13 +26,21 @@
 #   6. `launchctl kickstart -k` the spoke, verify it loaded the selected
 #      generation and re-registered with the hub.
 #   7. Report any other Hermes process still on an older generation.
+#   8. Clean up: delete old generations nothing uses any more, with Hermes's own
+#      collector (hermes_cli.runtime_state.collect_generations; it refuses the
+#      selected generation and any generation a running process holds a lease
+#      on). Runs on every pass, so an old generation goes within ~15 min of its
+#      last user (e.g. the desktop app) restarting, instead of lingering until
+#      the next `hermes update`. Hermes's own 24 h minimum age is not applied
+#      (HERMES_POST_UPDATE_GC_MIN_AGE, default 0 s); leases are the real guard.
 #
-# Usage: hermes-post-update [--update] [--watch] [--force] [--no-wait]
+# Usage: hermes-post-update [--update] [--watch] [--force] [--no-wait] [--no-gc]
 #                           [--wait SECONDS] [--settle SECONDS]
 #   --watch    unattended mode for launchd: quiet when nothing to do, no hermes
 #              invocation, macOS notification when it acts or fails
 #   --force    restart the spoke even if it is already on the selected generation
 #   --no-wait  restart immediately even if spoke tasks are in flight
+#   --no-gc    skip step 8 (leave old generations for `hermes pm gc`)
 #   --wait N   max seconds to wait for in-flight tasks (default 600; 300 in --watch)
 #   --settle N seconds facts.json must be unchanged first (default 0; 60 in --watch)
 # Exit: 0 ok / nothing to do, 1 failure, 2 in-flight tasks did not finish in time.
@@ -49,14 +57,16 @@ LOCK_DIR="${HERMES_POST_UPDATE_LOCK:-$HERMES_HOME/locks/hermes-post-update.lock}
 LAUNCHCTL="${LAUNCHCTL:-launchctl}"
 LSOF="${LSOF:-lsof}"
 VERIFY_SECS="${HERMES_POST_UPDATE_VERIFY_SECS:-90}"
+GC_MIN_AGE="${HERMES_POST_UPDATE_GC_MIN_AGE:-0}"
 
-WATCH=0; FORCE=0; NO_WAIT=0; DO_UPDATE=0; WAIT_SECS=""; SETTLE_SECS=""
+WATCH=0; FORCE=0; NO_WAIT=0; NO_GC=0; DO_UPDATE=0; WAIT_SECS=""; SETTLE_SECS=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --update)  DO_UPDATE=1 ;;
         --watch)   WATCH=1 ;;
         --force)   FORCE=1 ;;
         --no-wait) NO_WAIT=1 ;;
+        --no-gc)   NO_GC=1 ;;
         --wait)    WAIT_SECS="${2:?--wait needs seconds}"; shift ;;
         --settle)  SETTLE_SECS="${2:?--settle needs seconds}"; shift ;;
         -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -141,6 +151,72 @@ print(n)
 ' "$LEDGER" "$TASK_TTL"
 }
 
+collect_old_generations() {  # step 8
+    [ "$NO_GC" = 0 ] || return 0
+    local others="" d n out kind name bytes gb freed=0 count=0
+    for d in "$HERMES_HOME"/installs/*/environments/*/; do
+        [ -d "$d" ] || continue
+        n="$(basename "$d")"; [ "$n" = "$SEL" ] || others="$others $n"
+    done
+    [ -n "$others" ] || return 0   # nothing but the selected generation: nothing to do
+    # Hermes's own collector, imported directly (stdlib-only modules; never runs
+    # hermes_bootstrap, so it cannot trigger a dependency build). It takes the
+    # install lock for at most 10 s and skips if an install holds it.
+    if ! out="$("$PY" -I -c '
+import os, sys
+from pathlib import Path
+root, min_age = Path(sys.argv[1]), float(sys.argv[2])
+sys.path.insert(0, str(root))
+from hermes_cli.runtime_state import collect_generations, leases_held
+from pm.environments import install_state_dir, selected_venv
+from pm.runtime import collect_runtime_generations
+
+def size(p):
+    total = 0
+    for dp, _, files in os.walk(p):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(dp, f)).st_blocks * 512
+            except OSError:
+                pass
+    return total
+
+state = install_state_dir(root)
+selected = selected_venv(root).parent.resolve()
+sizes = {}
+gens = state / "environments"
+for g in sorted(gens.iterdir()) if gens.is_dir() else []:
+    if not g.is_dir() or g.resolve() == selected:
+        continue
+    if leases_held(g):
+        print("kept", g.name, 0)
+        continue
+    sizes[g.name] = size(g)
+for g in collect_generations(root, min_age_seconds=min_age) if sizes else []:
+    print("removed", g.name, sizes.get(g.name, 0))
+for g in collect_runtime_generations(state / "pm-runtime"):
+    print("removed-runtime", g.name, 0)
+' "$HERMES_AGENT_ROOT" "$GC_MIN_AGE" 2>&1)"; then
+        warn "cleanup of old generations failed (left for hermes pm gc): $(printf '%s' "$out" | tail -n 1)"
+        return 0
+    fi
+    while read -r kind name bytes; do
+        case "$kind" in
+            removed)
+                count=$((count + 1)); freed=$((freed + bytes))
+                say "removed unused old generation $name ($((bytes / 1048576)) MB)" ;;
+            removed-runtime)
+                say "removed unused package-manager runtime generation $name" ;;
+            kept)
+                [ "$WATCH" = 1 ] || say "kept old generation $name: still in use by a running Hermes process" ;;
+        esac
+    done <<< "$out"
+    if [ "$count" -gt 0 ]; then
+        gb="$(awk -v b="$freed" 'BEGIN { printf "%.1f", b / 1073741824 }')"
+        notify "Removed $count old Hermes environment(s), freed ${gb} GB."
+    fi
+}
+
 # ---- 1-2. update / finalize (manual mode only) -----------------------------
 if [ "$DO_UPDATE" = 1 ]; then
     say "running hermes update..."
@@ -168,19 +244,18 @@ SEL="$(selected_env)"
 # ---- 4. is the spoke current? ----------------------------------------------
 PID="$(spoke_pid)"
 CUR=""
+RESTART=1
 if [ -n "$PID" ]; then
     for _ in $(seq 1 30); do  # a just-started spoke may not have opened its env yet
         CUR="$(envs_of_pid "$PID")"; [ -n "$CUR" ] && break; sleep 1
     done
     if [ -z "$CUR" ] && [ "$FORCE" = 0 ]; then
         warn "cannot tell which environment spoke pid $PID uses (nothing open under environments/); not restarting"
-        exit 0
-    fi
-    if [ "$CUR" = "$SEL" ] && [ "$FORCE" = 0 ]; then
+        RESTART=0
+    elif [ "$CUR" = "$SEL" ] && [ "$FORCE" = 0 ]; then
         [ "$WATCH" = 1 ] || say "spoke (pid $PID) already on $SEL; no restart needed"
-        exit 0
-    fi
-    if [ "$CUR" = "$SEL" ]; then
+        RESTART=0
+    elif [ "$CUR" = "$SEL" ]; then
         say "spoke (pid $PID) already on $SEL; restarting anyway (--force)"
     else
         say "selected environment is $SEL; spoke (pid $PID) is on '${CUR:-unknown}'; restart required"
@@ -189,6 +264,7 @@ else
     say "spoke $SPOKE_LABEL is not running; starting it on $SEL"
 fi
 
+if [ "$RESTART" = 1 ]; then
 # ---- 5. drain --------------------------------------------------------------
 if [ "$NO_WAIT" = 0 ]; then
     waited=0
@@ -240,4 +316,7 @@ else
     warn "restart those processes (gateway: hermes gateway restart; desktop app: quit and reopen)"
     notify "Spoke moved to ${SEL:0:8}. Gateway/desktop still on an old environment: restart them."
 fi
-say "old generations are removed automatically once unused and >24h old (hermes pm gc)"
+fi  # RESTART
+
+# ---- 8. clean up old generations nothing uses any more ----------------------
+collect_old_generations

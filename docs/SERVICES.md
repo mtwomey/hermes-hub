@@ -7,7 +7,7 @@ the spoke current across Hermes updates:
 |---|---|---|
 | `ai.hermes.hub` | Hub listener on port 8770 | `/Users/mtwomey/Git_Repos/hermes-hub/.venv` |
 | `ai.hermes.spoke` | Pumpkin's outbound local Hermes spoke | Hermes's currently selected dependency generation, resolved at start (no pinned venv path) — **no package is installed by this service** |
-| `ai.hermes.post-update` | Restarts the spoke onto Hermes's new dependency generation after `hermes update`; installed with the spoke | `services/hermes-post-update.sh --watch` (bash + Hermes's own interpreter, stdlib only). See [`POST-UPDATE.md`](POST-UPDATE.md) |
+| `ai.hermes.post-update` | Restarts the spoke onto Hermes's new dependency generation after `hermes update`, then deletes old generations nothing uses any more; installed with the spoke | `services/hermes-post-update.sh --watch` (bash + Hermes's own interpreter, stdlib only). See [`POST-UPDATE.md`](POST-UPDATE.md) |
 
 The installer is `services/install-hub-services.sh`. It owns only these labels. It must never target `ai.hermes.gateway`. `SERVICE_MODE` (`hub`, `spoke`, or `both`) selects which are managed by any given `install`/`uninstall`/`status`/`reinstall` invocation; the watcher goes with the spoke. `install-watcher` / `uninstall-watcher` manage only the watcher and never touch the hub or spoke.
 

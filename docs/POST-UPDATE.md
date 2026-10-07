@@ -3,13 +3,16 @@
 `ai.hermes.post-update` is a small launchd watcher, installed with the spoke.
 After any `hermes update` (or anything else that makes Hermes switch its Python
 dependency environment) it restarts `ai.hermes.spoke` onto the new environment
-automatically. It doesn't change anything else.
+automatically, and deletes old environments once nothing uses them any more.
+It doesn't change anything else.
 
 If you only read one thing: **after `hermes update` you no longer need to
 restart the spoke by hand.** Within about a minute and a half the watcher does
 it, waits for any running peer task to finish first, checks the result, and
 posts a macOS notification. The gateway and desktop app are still yours to
-restart (the update normally does the gateway).
+restart (the update normally does the gateway). Once they've restarted, the
+old ~730 MB environment is deleted automatically, usually within seconds and
+at most 15 minutes later.
 
 ## Why this exists
 
@@ -34,9 +37,15 @@ Hermes process picks the selected generation **when it starts**:
 
 Nothing pins a generation path; that would break on the next update (see
 `INCIDENTS.md`, 2026-09-28). So a spoke started before an update keeps running
-the old generation until it's restarted. Hermes deletes an unused old
-generation only after its last user exits and it is more than 24 h old, so a
-spoke that's never restarted also keeps ~730 MB of stale environment on disk.
+the old generation until it's restarted.
+
+Hermes's own cleanup doesn't help much either. Its garbage collector runs only
+right after `hermes update` publishes a new generation
+(`collect_superseded_generations` in `hermes_cli/venv_sync.py`), or when you run
+`hermes pm gc`. It skips any generation a running process still uses, or that
+is under 24 h old. At that moment the old generation is almost always still in
+use (nothing has restarted yet), so it's skipped, and nothing looks again until
+the *next* update. Each update therefore left ~730 MB behind indefinitely.
 
 ## How it works
 
@@ -61,6 +70,19 @@ spoke that's never restarted also keeps ~730 MB of stale environment on disk.
    a new `connected and registered` line appeared in the spoke log.
 6. **Reports.** Warns about any other Hermes process still on an older generation
    (typically the desktop app until you relaunch it) and posts a notification.
+7. **Cleans up (every run, even when the spoke was already current).** If any
+   generation other than the selected one exists, it runs Hermes's own collector
+   (`hermes_cli.runtime_state.collect_generations`, the same code as
+   `hermes pm gc`), imported directly so no Hermes startup runs. The collector
+   deletes only generations that are not selected and that no running process
+   holds a lease on. It takes Hermes's install lock for at most 10 s and skips
+   the run if an install holds it. Hermes's extra 24 h minimum age is **not**
+   applied (`HERMES_POST_UPDATE_GC_MIN_AGE`, default `0`): the leases are the
+   real guard. Each removal is logged with its size and announced in a
+   notification. A generation still in use is kept silently and removed on the
+   first run after its last user exits. Restarting the gateway or desktop app
+   usually triggers that run within seconds, at most 15 min later. The small
+   package-manager runtime generations (`pm-runtime/`) are collected the same way.
 
 Safety properties:
 
@@ -70,8 +92,11 @@ Safety properties:
   (nothing open under `environments/` yet), it does nothing.
 - **One instance at a time**: lock at `~/.hermes/locks/hermes-post-update.lock`;
   a lock left by a dead process is reclaimed.
-- It touches only `ai.hermes.spoke`. Never the hub, never the gateway, never
-  Hermes's environments, never credentials.
+- It restarts only `ai.hermes.spoke`: never the hub, never the gateway, never
+  credentials. The only thing it deletes is old dependency generations, and only
+  through Hermes's own collector, which refuses anything selected or in use.
+  `--no-gc` (or `HERMES_POST_UPDATE_GC_MIN_AGE=86400` to keep Hermes's 24 h rule)
+  turns that down.
 
 ## Install
 
@@ -119,9 +144,11 @@ hermes-post-update --help
 ```
 
 Manual mode first runs `hermes --version`, which finishes any dependency build
-the update left pending, then does steps 3–6 with no settle delay and a 10-minute
-drain. Flags: `--force` (restart even if current), `--no-wait` (don't wait for
-in-flight tasks), `--wait N`, `--settle N`, `--watch`.
+the update left pending, then does steps 3–7 with no settle delay and a 10-minute
+drain. Manual mode also names any old generation it had to keep because a
+process still uses it. Flags: `--force` (restart even if current), `--no-wait`
+(don't wait for in-flight tasks), `--no-gc` (skip cleanup), `--wait N`,
+`--settle N`, `--watch`.
 
 Exit codes: `0` done or nothing to do, `1` failure, `2` in-flight tasks didn't
 finish in time (spoke left untouched).
@@ -144,7 +171,14 @@ successful move looks like:
 [post-update] spoke re-registered with the hub
 ```
 
+and a cleanup, once the last process has left the old generation:
+
+```
+[post-update] removed unused old generation 7eba115c… (727 MB)
+```
+
 Notifications (title **Hermes post-update**) appear only when it acts, postpones,
+removes old environments ("Removed 1 old Hermes environment(s), freed 0.7 GB"),
 or fails. "Gateway/desktop still on an old environment: restart them" means
 the spoke is fine and something else still needs a restart: `hermes gateway
 restart`, or quit and reopen the desktop app.
@@ -165,7 +199,8 @@ lsof -p "$P" | grep -oE 'environments/[0-9a-f]+' | sort -u        # == new selec
 ```
 
 Then restart the gateway (`hermes gateway restart`) and relaunch the desktop app
-so they leave the old generation too; Hermes garbage-collects it after 24 h.
+so they leave the old generation too. The watcher's next run (usually triggered
+by that restart) deletes it and logs `removed unused old generation …`.
 Finish with a routed task to the spoke (e.g. `peer_ask` "reply with hostname"):
 registration alone isn't proof (see `INCIDENTS.md`).
 
@@ -182,6 +217,8 @@ and plist).
 | "cannot tell which environment spoke pid … uses" | The spoke started seconds ago or is unhealthy. Check `ai.hermes.spoke.error.log`; the next run retries. |
 | "spoke pid N loaded 'X', expected Y" | The spoke resolved a different interpreter/generation. Check `HERMES_SPOKE_PYTHON` overrides in the spoke plist and `INCIDENTS.md` (2026-09-28). |
 | Watcher never fires | `WatchPaths` must name the directory that contains the live `facts.json`; re-run `install-watcher`. |
+| Old generation not deleted | Something still uses it: `hermes-post-update` names what it kept; `lsof \| grep environments/<hash>` shows who. Relaunch that process. |
+| "cleanup of old generations failed" | Logged with the collector's last error line; nothing was deleted. `hermes pm gc` is the manual fallback. |
 
 ## Verified
 
@@ -201,3 +238,9 @@ and plist).
   watcher waited for it to finish, restarted the spoke at 17:37:36, verified it
   on the new generation and re-registered at 17:37:39. The next routed task was
   served by the new spoke process.
+- **Cleanup, Pumpkin, 2026-10-07.** Manual run with the real collector kept
+  `990041d4…` (held by the desktop app) and removed nothing. A further
+  `hermes pm repair` moved the spoke automatically (17:55:10). The old
+  `7eba115c…` was kept while the gateway still held it. `hermes gateway restart`
+  at 17:56:13 freed it, and the watcher deleted it at 17:56:32 (727 MB) with no
+  manual step.
