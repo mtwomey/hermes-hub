@@ -1,6 +1,6 @@
 """hermes-hub-peer — native Hermes plugin (W3, M2).
 
-Registers the six ``peer_*`` model tools so a normal Hermes conversation can
+Registers the seven ``peer_*`` model tools so a normal Hermes conversation can
 say *"please check with Olive and see if she can access this."* (V1).
 
 **Why a plugin and not a drop-in tool module.** ``tools/registry.py``'s

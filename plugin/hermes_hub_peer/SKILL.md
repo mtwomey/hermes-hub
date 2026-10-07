@@ -29,7 +29,8 @@ examples.
 | "Which of my machines are up?" | `peer_list` | Start here; nothing else knows |
 | "What can Olive do?" | `peer_info` | `peer_name` required |
 | Cache a peer's skills locally | `peer_discover` | Same data, persisted |
-| "Ask Olive whether she can reach X" | `peer_ask` | Synchronous; returns her answer |
+| "Ask Olive whether she can reach X" | `peer_ask` | Waits up to 270 s; returns her answer or `state=working` + `task_id` |
+| A `peer_ask` came back `state=working` | `peer_wait` | Same `task_id`; waits up to 270 s more. **Never re-send the request** |
 | Continue the same peer conversation | `peer_ask` + `context_id` | Reuse the id from the previous reply |
 | Send a local file to a peer | `peer_ask` + `file_path` | Arrives on the peer's disk before its turn |
 | Re-read an earlier task's outcome | `peer_status` | `task_id` from a `peer_ask` result |
@@ -48,6 +49,13 @@ examples.
 - **Peers have real side-effect authority.** A peer may write files and run
   commands. Ask for what you actually want done, and be as specific as you
   would be with your own tools.
-- **This is synchronous.** A long peer task blocks the tool call.
-  `peer_status` reads an existing task; it does not run anything in the
-  background.
+- **Never re-ask a running request.** `peer_ask` waits up to ~4.5 min. If the
+  peer is still working it returns `state=working` with a `task_id` and an
+  instruction: the task keeps running on the hub (up to its 30 min TTL) and
+  its answer is not lost. Call `peer_wait(task_id)` (<=270 s per call) or
+  `peer_status(task_id)` (no wait; shows `elapsed_s`, `last_heard_s_ago`,
+  `long_running`). Sending the same request again makes the peer redo the
+  work.
+- **Hard limit 30 min.** A task with no result after the hub TTL ends
+  `failed` with `hermes_error=ttl_expired`; `spoke_disconnected` means the
+  peer dropped off mid-task.
