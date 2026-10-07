@@ -40,7 +40,7 @@ SERVICE_MODE=hub
 HUB_BIND_HOST=0.0.0.0
 HUB_PORT=8770
 HUB_PUBLIC_URL=https://hub.example.invalid:8770
-HUB_TASK_TIMEOUT_SECONDS=300
+HUB_TASK_TTL_SECONDS=1800
 ```
 
 `HUB_PUBLIC_URL` must be the reachable address advertised to spokes. A wildcard bind without it is rejected.
@@ -85,7 +85,7 @@ HUB_PUBLIC_URL=https://hub.example.invalid:8770
 SPOKE_HUB_HOST=127.0.0.1
 HUB_PORT=8770
 SPOKE_NAME=HubHost
-HUB_TASK_TIMEOUT_SECONDS=300
+HUB_TASK_TTL_SECONDS=1800
 ```
 
 Install both services:

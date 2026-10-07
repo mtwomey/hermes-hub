@@ -339,3 +339,14 @@ def test_peer_status_returns_final_text_and_artifacts(monkeypatch):
         }
     ]
     assert "long_running" not in out
+
+
+def test_hub_service_template_sets_task_ttl_not_the_deprecated_timeout():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "services"
+    plist = (root / "ai.hermes.hub.plist.template").read_text()
+    assert "HERMES_HUB_TASK_TTL_SECONDS" in plist
+    assert "HERMES_HUB_TASK_TIMEOUT_SECONDS" not in plist
+    installer = (root / "install-hub-services.sh").read_text()
+    assert ":-1800}" in installer

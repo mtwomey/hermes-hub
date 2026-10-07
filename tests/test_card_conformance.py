@@ -180,6 +180,48 @@ def test_send_message_blocks_until_terminal_as_card_states():
         assert "".join(p["text"] for p in task["status"]["message"]["parts"]) == "done"
 
 
+def test_card_submit_then_poll_flow_returns_working_then_the_answer():
+    """Phase 1.6 (D7): a naive caller follows ONLY the card's submit/poll
+    contract: SendMessage with the card's configuration returns at once with
+    a task id; GetTask polling later yields the completed answer."""
+    with LiveHub(external_token=HUB_TOKEN) as hub:
+        hub.registry.register(name="Slow", skills=[])
+        hub.router.register_connection("Slow", _SlowSpoke(router=hub.router, name="Slow", reply="done"))
+        card = _get_card(hub.base_url, HUB_TOKEN)
+        params = _routing_extension(card)["params"]
+        submit = params["submit"]
+        poll = params["poll"]
+        rpc_url, body = _build_request_from_card(card, spoke="Slow", text="hi", credential=None)
+        body["method"] = submit["method"]
+        body["params"]["configuration"] = copy.deepcopy(submit["configuration"])
+        headers = _headers_from_card(card, HUB_TOKEN)
+        started = time.time()
+        payload = httpx.post(rpc_url, json=body, headers=headers, timeout=30).json()
+        assert time.time() - started < 1.0
+        task = payload["result"]["task"]
+        assert task["status"]["state"] in submit["initialStates"]
+        deadline = time.time() + 10
+        while True:
+            lookup = {"jsonrpc": "2.0", "id": "2", "method": poll["method"], "params": {"id": task["id"]}}
+            task = httpx.post(rpc_url, json=lookup, headers=headers, timeout=30).json()["result"]
+            if task["status"]["state"] in poll["terminalStates"] or time.time() > deadline:
+                break
+            time.sleep(poll["intervalSeconds"])
+        assert task["status"]["state"] == "TASK_STATE_COMPLETED"
+        assert "".join(p["text"] for p in task["status"]["message"]["parts"]) == "done"
+
+
+def test_card_documents_task_ttl_and_hermes_error_codes():
+    with LiveHub(external_token=HUB_TOKEN) as hub:
+        params = _routing_extension(_get_card(hub.base_url, HUB_TOKEN))["params"]
+        lifetime = params["taskLifetime"]
+        assert lifetime["ttlSeconds"] == 20  # LiveHub's configured TTL (default 1800)
+        assert "ttl_expired" in lifetime["onExpiry"]
+        for code in ("ttl_expired", "spoke_disconnected", "spoke_unavailable", "spoke_task_failed"):
+            assert code in params["hermesErrors"]
+        assert "timeout" not in params["hermesErrors"]
+
+
 def test_card_never_contains_secret_values(monkeypatch):
     monkeypatch.setenv("HERMES_HUB_TOKEN", HUB_TOKEN)
     monkeypatch.setenv("HERMES_HUB_PEER_CREDENTIAL_OLIVE", OLIVE_CRED)

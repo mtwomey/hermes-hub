@@ -171,8 +171,17 @@ def caller_contract_params(
             ),
             "askSimple": (
                 "SendMessage — same params; blocks until the task is terminal and "
-                "returns one JSON body with result.task. Set your HTTP client "
-                f"timeout above the hub task timeout ({timeout}s)."
+                "returns one JSON body with result.task (up to the task TTL, "
+                f"{timeout}s). Prefer 'submit' + 'poll' for anything that may run "
+                "longer than your HTTP client is willing to wait."
+            ),
+            "submitAndPoll": (
+                "Recommended for long tasks: SendMessage with params.configuration "
+                "{\"returnImmediately\": true} returns at once with result.task "
+                "(state SUBMITTED/WORKING); then GetTask {\"id\": taskId} until a "
+                "terminal state. The hub runs every task to completion whether or "
+                "not anyone is waiting; do NOT resend the request to 'retry' a slow "
+                "task -- poll the task id you already have."
             ),
             "result": (
                 "Find result.task or result.statusUpdate; when status.state is "
@@ -186,6 +195,45 @@ def caller_contract_params(
                 "(next to messageId) to continue the same conversation with that spoke."
             ),
             "lookup": 'GetTask with params {"id": "<task id>"} returns a task\'s current state.',
+        },
+        "submit": {
+            "method": "SendMessage",
+            "configuration": {"returnImmediately": True},
+            "initialStates": ["TASK_STATE_SUBMITTED", "TASK_STATE_WORKING"],
+            "returns": "result.task with id and contextId",
+        },
+        "poll": {
+            "method": "GetTask",
+            "params": {"id": "<task id>"},
+            "intervalSeconds": 1,
+            "terminalStates": [
+                "TASK_STATE_COMPLETED",
+                "TASK_STATE_FAILED",
+                "TASK_STATE_CANCELED",
+                "TASK_STATE_REJECTED",
+            ],
+            "metadata": (
+                "result.metadata.startedAt / lastHeartbeatAt (ISO-8601 UTC): when "
+                "the hub started the task and last heard from the spoke."
+            ),
+        },
+        "taskLifetime": {
+            "ttlSeconds": int(task_timeout_seconds)
+            if float(task_timeout_seconds).is_integer()
+            else task_timeout_seconds,
+            "onExpiry": (
+                "A task with no terminal frame after ttlSeconds ends "
+                "TASK_STATE_FAILED with status.message.metadata.hermesError="
+                "ttl_expired. A caller disconnecting never fails a task."
+            ),
+            "resultRetention": "In hub memory until the hub restarts.",
+        },
+        "hermesErrors": {
+            "missing_target_spoke": "message.metadata.targetSpoke was absent",
+            "spoke_unavailable": "the named spoke is not connected (no queueing)",
+            "spoke_task_failed": "the spoke reported failure (e.g. credential rejected)",
+            "spoke_disconnected": "the spoke's connection dropped before it finished",
+            "ttl_expired": "no result within taskLifetime.ttlSeconds",
         },
         "errors": (
             "HTTP 401 = missing/wrong hub token (applies to this card too). "
