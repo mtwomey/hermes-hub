@@ -95,13 +95,13 @@ def build_hub_app(
     base_url: str = "http://127.0.0.1:8770",
     expected_spoke_token: str = "",
     expected_external_token: str = "",
-    task_timeout_seconds: float = 300.0,
+    task_timeout_seconds: float = 1800.0,
 ) -> Starlette:
     """Build the hub's ASGI app: A2A surface + spoke WebSocket endpoint."""
     registry = registry or SpokeRegistry()
     router = router or Router(base_url=base_url)
 
-    executor = HubExecutor(router=router, timeout_seconds=task_timeout_seconds)
+    executor = HubExecutor(router=router, ttl_seconds=task_timeout_seconds)
     def _build_card():
         # ``router.base_url`` is authoritative when set: test harnesses bind
         # an ephemeral port after the app is built and update it there.

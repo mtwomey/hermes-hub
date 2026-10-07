@@ -20,7 +20,7 @@ from a2a.server.tasks import TaskUpdater
 from a2a.types import Part, Task, TaskState, TaskStatus
 
 from .caller_contract import META_SPOKE_CREDENTIAL, META_TARGET_SPOKE
-from .router import Router, SpokeUnavailableError
+from .router import Router, SpokeUnavailableError, TaskTTLExpired
 
 
 def message_text(context: RequestContext) -> str:
@@ -87,9 +87,20 @@ async def open_task(context: RequestContext, event_queue: EventQueue) -> TaskUpd
 class HubExecutor(AgentExecutor):
     """Routes an inbound A2A task to the named spoke via :class:`Router`."""
 
-    def __init__(self, *, router: Router, timeout_seconds: float = 300.0) -> None:
+    def __init__(
+        self,
+        *,
+        router: Router,
+        ttl_seconds: float = 1800.0,
+        timeout_seconds: float | None = None,
+    ) -> None:
         self.router = router
-        self.timeout_seconds = timeout_seconds
+        # ``timeout_seconds`` is the deprecated pre-Phase-1 name.
+        self.ttl_seconds = float(timeout_seconds if timeout_seconds is not None else ttl_seconds)
+
+    @property
+    def timeout_seconds(self) -> float:
+        return self.ttl_seconds
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         updater = await open_task(context, event_queue)
@@ -123,7 +134,7 @@ class HubExecutor(AgentExecutor):
                 metadata=metadata,
                 credential=credential,
                 inbound_file=inbound_file,
-                timeout_seconds=self.timeout_seconds,
+                ttl_seconds=self.ttl_seconds,
             ):
                 frame_type = frame.get("type")
                 if frame_type == "task_status":
@@ -166,7 +177,9 @@ class HubExecutor(AgentExecutor):
                     await updater.failed(
                         updater.new_agent_message(
                             [Part(text=str(frame.get("error", "task failed")))],
-                            metadata={"hermesError": "spoke_task_failed"},
+                            metadata={
+                                "hermesError": str(frame.get("hermes_error") or "spoke_task_failed")
+                            },
                         )
                     )
                     return
@@ -177,11 +190,11 @@ class HubExecutor(AgentExecutor):
                     metadata={"hermesError": "spoke_unavailable"},
                 )
             )
-        except TimeoutError as exc:
+        except TaskTTLExpired as exc:
             await updater.failed(
                 updater.new_agent_message(
                     [Part(text=str(exc))],
-                    metadata={"hermesError": "timeout"},
+                    metadata={"hermesError": "ttl_expired"},
                 )
             )
 
