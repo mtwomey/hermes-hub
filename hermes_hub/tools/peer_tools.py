@@ -35,11 +35,13 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from hermes_hub.hub_client import HubClient, HubClientError
+from hermes_hub.hub_client import TERMINAL_STATES, HubClient, HubClientError, summarize_task
+from hermes_hub.tools import inflight
 
 from hermes_hub.caller_contract import (
     ENV_CALLER_CREDENTIAL_PREFIX as ENV_CREDENTIAL_PREFIX,
@@ -353,6 +355,38 @@ def _write_cache(peer_name: str, peer: Dict[str, Any]) -> None:
     path.write_text(json.dumps(cache, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def already_in_progress_instruction(peer_name: str, task_id: str) -> str:
+    return (
+        f"{peer_name or 'The peer'} is already working on a request from this "
+        f"session (task {task_id}); nothing was sent. Use "
+        f"peer_wait(task_id=\"{task_id}\") to get that result. Pass "
+        f"new_request=true only if this is genuinely a different request."
+    )
+
+
+def _guard_hit(args: Dict[str, Any], session_key: str, peer_name: str) -> Optional[str]:
+    """Phase 2.2: return the guard result if this session already has a
+    non-terminal task on ``peer_name``; clears stale entries."""
+    entry = inflight.get_inflight(session_key, peer_name)
+    if not entry:
+        return None
+    task_id = str(entry.get("task_id") or "")
+    try:
+        state = summarize_task(_run(_client(args).get_task(task_id)), task_id)["state"]
+    except Exception:
+        state = "unknown"  # hub unreachable: keep guarding rather than double-send
+    if state in TERMINAL_STATES:
+        inflight.clear_task(task_id)
+        return None
+    return _ok(
+        state="already_in_progress",
+        task_id=task_id,
+        original_request=str(entry.get("request") or ""),
+        elapsed_s=int(time.time() - float(entry.get("at") or time.time())),
+        instruction=already_in_progress_instruction(peer_name, task_id),
+    )
+
+
 def peer_ask(args: Dict[str, Any], **_kwargs: Any) -> str:
     """Send a request to a named spoke through the hub and return its reply."""
     peer_name = _arg(args, "peer_name")
@@ -361,6 +395,12 @@ def peer_ask(args: Dict[str, Any], **_kwargs: Any) -> str:
         return _err("peer_name is required")
     if not message.strip():
         return _err("message is required")
+    session_key = inflight.caller_session_key(_kwargs)
+    if not _truthy(args.get("new_request")):
+        guarded = _guard_hit(args, session_key, peer_name)
+        if guarded is not None:
+            return guarded
+    context_id = _arg(args, "context_id") or inflight.last_context(session_key, peer_name)
     credential = resolve_peer_credential(
         peer_name, explicit=str(args.get("credential") or "")
     )
@@ -379,7 +419,7 @@ def peer_ask(args: Dict[str, Any], **_kwargs: Any) -> str:
             _client(args).ask(
                 peer_name,
                 message,
-                context_id=_arg(args, "context_id"),
+                context_id=context_id,
                 credential=credential,
                 file_name=file_name,
                 file_bytes=file_bytes,
@@ -390,7 +430,29 @@ def peer_ask(args: Dict[str, Any], **_kwargs: Any) -> str:
         return _err(str(exc))
     except Exception as exc:  # pragma: no cover - defensive
         return _err(str(exc))
+    try:
+        inflight.remember_context(session_key, peer_name, str(result.get("context_id") or ""))
+        if result.get("state") not in TERMINAL_STATES and result.get("task_id"):
+            inflight.set_inflight(
+                session_key, peer_name, task_id=str(result["task_id"]), request=message
+            )
+    except OSError:
+        pass  # the guard is best-effort; never fail a delivered ask over it
     return _task_result(result, peer_name=peer_name)
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes")
+    return bool(value)
+
+
+def _clear_if_terminal(result: Dict[str, Any]) -> None:
+    if result.get("state") in TERMINAL_STATES:
+        try:
+            inflight.clear_task(str(result.get("task_id") or ""))
+        except OSError:
+            pass
 
 
 def still_running_instruction(peer_name: str, task_id: str) -> str:
@@ -448,6 +510,7 @@ def peer_wait(args: Dict[str, Any], **_kwargs: Any) -> str:
         return _err(str(exc))
     except Exception as exc:  # pragma: no cover - defensive
         return _err(str(exc))
+    _clear_if_terminal(result)
     return _task_result(result, peer_name=_arg(args, "peer_name"))
 
 
@@ -650,7 +713,19 @@ PEER_ASK_SCHEMA = {
             },
             "context_id": {
                 "type": "string",
-                "description": "Reuse a prior context_id to continue the same peer conversation.",
+                "description": (
+                    "Reuse a prior context_id to continue the same peer conversation. "
+                    "Defaults to this session's last context with that peer."
+                ),
+            },
+            "new_request": {
+                "type": "boolean",
+                "description": (
+                    "Set true ONLY when this is genuinely a different request while an "
+                    "earlier peer_ask from this session to the same peer is still "
+                    "running; otherwise you get state=already_in_progress and should "
+                    "use peer_wait."
+                ),
             },
             "file_path": {
                 "type": "string",
