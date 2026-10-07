@@ -214,6 +214,17 @@ duplicate messageId via raw curl → single execution.
      interrupt flag or finishes, and tokens already generated are billed.
      The worker thread itself cannot be killed; it exits when
      `run_conversation` returns. The hub never waits on it.
+     **Prerequisite found (BEA-306):** `SpokeClient._receive_loop` awaits
+     `on_frame(frame)` and `SpokeExecutor.handle_frame` awaits
+     `handle_task_frame` for the whole agent turn, so while a task runs the
+     spoke reads no further frames — a `task_cancel` would only be seen after
+     the task finished (and concurrent tasks to one spoke are serialized
+     today). 3.2 must therefore dispatch `task` frames as tracked background
+     asyncio tasks (`handle_frame` returns immediately; `_running[task_id]`
+     holds the asyncio task + agent handle; exceptions logged), keep
+     artifact frames in-order on the receive loop, and handle `task_cancel`
+     inline. Tests: cancel received while a slow runner is blocked; second
+     task frame is read while the first runs.
 3.3 **Hub:** `HubExecutor.cancel` (A2A `CancelTask`) and TTL expiry both send
    `task_cancel`; task ends `CANCELED`.
 3.4 **Tool:** `peer_cancel(task_id)`; in-flight guard entry cleared.
