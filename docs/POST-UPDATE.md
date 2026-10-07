@@ -152,7 +152,7 @@ hermes-post-update --update   # run `hermes update`, then this
 hermes-post-update --help
 ```
 
-Manual mode first runs `hermes --version`, which finishes any dependency build
+Manual mode first runs `hermes config path`, which finishes any dependency build
 the update left pending, then does steps 3–7 with no settle delay and a 10-minute
 drain. Manual mode also names any old generation it had to keep because a
 process still uses it. Flags: `--force` (restart even if current), `--no-wait`

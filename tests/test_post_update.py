@@ -239,7 +239,7 @@ def test_manual_mode_finalizes_hermes_first(rig):
     rig.select(NEW)
     rig.spoke(1000, NEW)
     rig.run()
-    assert "--version" in rig.calls("hermes_calls")
+    assert "config path" in rig.calls("hermes_calls")
 
 
 def test_watch_mode_never_runs_hermes_and_is_silent_when_current(rig):
@@ -501,5 +501,5 @@ def test_selection_change_during_run_triggers_another_pass(rig):
     assert f"selected environment changed to {third} during this run; checking again" in res.stdout
     assert "kickstart" in rig.calls()
     assert f"spoke pid 1001 is on {third}" in res.stdout
-    # The second pass must not re-run `hermes --version` / `hermes update`.
-    assert rig.calls("hermes_calls").count("--version") == 1
+    # The second pass must not re-run `hermes config path` / `hermes update`.
+    assert rig.calls("hermes_calls").count("config path") == 1

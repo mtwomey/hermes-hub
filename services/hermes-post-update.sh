@@ -16,7 +16,7 @@
 #
 # Steps:
 #   1. (--update) run `hermes update` first.
-#   2. (manual mode only) run `hermes --version` so hermes_bootstrap finishes any
+#   2. (manual mode only) run `hermes config path` so hermes_bootstrap finishes any
 #      pending dependency build. --watch never runs hermes, so it can never
 #      itself trigger a rebuild.
 #   3. Wait until Hermes is idle: its install lock (installs/<id>/.install.lock,
@@ -263,8 +263,10 @@ if [ "$DO_UPDATE" = 1 ] && [ "$PASS" = 1 ]; then
     "$HERMES_BIN" update || die "hermes update failed; spoke left untouched"
 fi
 if [ "$WATCH" = 0 ] && [ "$PASS" = 1 ]; then
-    say "finalizing Hermes dependencies (hermes --version)..."
-    "$HERMES_BIN" --version >/dev/null 2>&1 || die "hermes --version failed; fix Hermes before restarting the spoke"
+    # Not --version/--help or a `pm` subcommand: Hermes skips dependency completion
+    # for those (hermes_cli/venv_sync.py _METADATA_FLAGS / argv[0] == "pm").
+    say "finalizing Hermes dependencies (hermes config path)..."
+    "$HERMES_BIN" config path >/dev/null 2>&1 || die "hermes config path failed; fix Hermes before restarting the spoke"
 fi
 
 [ -n "$(facts_files)" ] || die "no $HERMES_HOME/installs/*/facts.json found; is this a package-managed Hermes install?"
