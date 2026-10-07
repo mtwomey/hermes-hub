@@ -15,6 +15,7 @@ shared, so the spoke cannot otherwise tell callers apart).
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 import time
@@ -28,6 +29,8 @@ RECENT_WINDOW_S = 2 * 3600
 RECENT_LIMIT = 5
 RETENTION_S = 24 * 3600
 DEFAULT_CALLER = "default"
+#: Overrides the ledger location (live gates use a throwaway path).
+ENV_LEDGER_PATH = "HERMES_HUB_SPOKE_LEDGER"
 
 
 def caller_label(metadata: Optional[Dict[str, Any]]) -> str:
@@ -39,7 +42,8 @@ class RequestLedger:
     def __init__(
         self, db_path: Optional[Path] = None, *, clock: Callable[[], float] = time.time
     ) -> None:
-        self.db_path = Path(db_path or DEFAULT_LEDGER_PATH)
+        env_path = os.environ.get(ENV_LEDGER_PATH, "").strip()
+        self.db_path = Path(db_path or env_path or DEFAULT_LEDGER_PATH)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._clock = clock
         self._lock = threading.Lock()

@@ -99,3 +99,19 @@ def test_executor_feeds_ledger_into_next_turn_and_records_outcome(tmp_path):
     entries = {e["task_id"]: e for e in led.recent("Pumpkin")}
     assert entries["t1"]["state"] == "completed"
     assert entries["t1"]["answer"] == "answer to first job"
+
+
+def test_production_spoke_entrypoints_wire_the_ledger():
+    """The managed spoke runs scripts/real_spoke.py (services/hermes-spoke-wrapper.sh),
+    not cli.py; both must construct SpokeExecutor with the persistent ledger."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for rel in ("scripts/real_spoke.py", "hermes_hub/cli.py"):
+        assert "ledger=RequestLedger(" in (root / rel).read_text(), rel
+
+
+def test_ledger_path_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HUB_SPOKE_LEDGER", str(tmp_path / "gate.db"))
+    led = RequestLedger()
+    assert led.db_path == tmp_path / "gate.db"

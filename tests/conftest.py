@@ -12,3 +12,5 @@ def _isolate_inflight_store(tmp_path, monkeypatch):
     from hermes_hub.tools import inflight
 
     monkeypatch.setattr(inflight, "store_path", lambda: tmp_path / "inflight-suite.json")
+    # Phase 2.4: a default-constructed RequestLedger must never hit ~/.hermes-hub.
+    monkeypatch.setenv("HERMES_HUB_SPOKE_LEDGER", str(tmp_path / "spoke_ledger-suite.db"))
