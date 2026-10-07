@@ -1,6 +1,8 @@
 #!/bin/bash
 # install-hub-services.sh -- install / uninstall / status for the V10
-# managed services: ai.hermes.hub and ai.hermes.spoke.
+# managed services: ai.hermes.hub, ai.hermes.spoke and (with the spoke)
+# ai.hermes.post-update, the watcher that keeps the spoke on Hermes's
+# currently selected dependency generation (docs/POST-UPDATE.md).
 #
 # Follows the ~/Git_Repos/hermes-services convention (label namespace,
 # wrapper-script indirection, ~/.hermes/logs/<label>.log, explicit
@@ -9,9 +11,8 @@
 # artifacts (V8: the hub is portable, so its service definition travels
 # with it).
 #
-# NEVER touches ai.hermes.gateway. Does not install anything into
-# ~/.hermes/hermes-agent/'s venv -- see hermes-spoke-wrapper.sh for the
-# loud-failure check instead.
+# NEVER touches ai.hermes.gateway. Never installs anything into Hermes's
+# runtime -- see hermes-spoke-wrapper.sh for the loud-failure check instead.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,7 +41,7 @@ fi
 HOMES_DIR="${HOMES_DIR:-$HOME/.hermes}"
 LOG_DIR="${LOG_DIR:-$HOMES_DIR/logs}"
 HUB_VENV="${HUB_VENV:-$REPO_DIR/.venv}"
-HERMES_AGENT_VENV="${HERMES_AGENT_VENV:-$HOMES_DIR/hermes-agent/venv}"
+LOCAL_BIN_DIR="${LOCAL_BIN_DIR:-$HOME/.local/bin}"
 HUB_BIND_HOST="${HUB_BIND_HOST:-${CONFIG_HUB_BIND_HOST:-${HUB_HOST:-${CONFIG_HUB_HOST:-127.0.0.1}}}}"
 SPOKE_HUB_HOST="${SPOKE_HUB_HOST:-${CONFIG_SPOKE_HUB_HOST:-127.0.0.1}}"
 HUB_PORT="${HUB_PORT:-${CONFIG_HUB_PORT:-8770}}"
@@ -69,14 +70,18 @@ LAUNCH_AGENTS_DIR="${LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
 
 HUB_LABEL="ai.hermes.hub"
 SPOKE_LABEL="ai.hermes.spoke"
+POST_UPDATE_LABEL="ai.hermes.post-update"
 
 HUB_TEMPLATE="$SCRIPT_DIR/ai.hermes.hub.plist.template"
 SPOKE_TEMPLATE="$SCRIPT_DIR/ai.hermes.spoke.plist.template"
 HUB_WRAPPER="$SCRIPT_DIR/hermes-hub-wrapper.sh"
 SPOKE_WRAPPER="$SCRIPT_DIR/hermes-spoke-wrapper.sh"
+POST_UPDATE_TEMPLATE="$SCRIPT_DIR/ai.hermes.post-update.plist.template"
+POST_UPDATE_SCRIPT="$SCRIPT_DIR/hermes-post-update.sh"
 
 HUB_PLIST="$LAUNCH_AGENTS_DIR/${HUB_LABEL}.plist"
 SPOKE_PLIST="$LAUNCH_AGENTS_DIR/${SPOKE_LABEL}.plist"
+POST_UPDATE_PLIST="$LAUNCH_AGENTS_DIR/${POST_UPDATE_LABEL}.plist"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -86,6 +91,8 @@ NC='\033[0m'
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+has_spoke() { [ "$SERVICE_MODE" = spoke ] || [ "$SERVICE_MODE" = both ]; }
 
 check_dependencies() {
     log_info "Checking dependencies..."
@@ -104,8 +111,9 @@ check_dependencies() {
         exit 1
     fi
 
-    if { [ "$SERVICE_MODE" = spoke ] || [ "$SERVICE_MODE" = both ]; } && [ ! -d "$HERMES_AGENT_VENV" ]; then
-        log_warn "Hermes runtime venv not found at $HERMES_AGENT_VENV -- the spoke service will fail loudly at start rather than install anything into it."
+    if has_spoke && [ ! -x "$POST_UPDATE_SCRIPT" ]; then
+        log_error "Post-update script must be executable: $POST_UPDATE_SCRIPT"
+        exit 1
     fi
 
     mkdir -p "$LOG_DIR"
@@ -117,7 +125,8 @@ render_template() {
     sed \
         -e "s#__REPO_DIR__#$REPO_DIR#g" \
         -e "s#__HUB_VENV__#$HUB_VENV#g" \
-        -e "s#__HERMES_VENV__#$HERMES_AGENT_VENV#g" \
+        -e "s#__HOMES_DIR__#$HOMES_DIR#g" \
+        -e "s#__POST_UPDATE_SCRIPT__#$POST_UPDATE_SCRIPT#g" \
         -e "s#__HUB_BIND_HOST__#$HUB_BIND_HOST#g" \
         -e "s#__SPOKE_HUB_HOST__#$SPOKE_HUB_HOST#g" \
         -e "s#__HUB_PORT__#$HUB_PORT#g" \
@@ -148,7 +157,86 @@ create_plists() {
     fi
     rm -f "$tmp_spoke"
 
+    if has_spoke; then
+        create_post_update_plist
+    fi
+
     log_info "Plists written: $HUB_PLIST, $SPOKE_PLIST"
+}
+
+# The watcher fires when the directory holding facts.json changes. Each Hermes
+# checkout has its own install-state dir (~/.hermes/installs/<id>/); watch all
+# that exist, or the installs/ root on a machine that has none yet (the 15-min
+# StartInterval covers anything a watch misses).
+post_update_watch_paths() {
+    local found=0 d
+    for d in "$HOMES_DIR"/installs/*/; do
+        [ -f "${d}facts.json" ] || continue
+        printf '        <string>%s</string>\n' "${d%/}"
+        found=1
+    done
+    if [ "$found" = 0 ]; then
+        printf '        <string>%s</string>\n' "$HOMES_DIR/installs"
+    fi
+}
+
+create_post_update_plist() {
+    mkdir -p "$LAUNCH_AGENTS_DIR" "$LOG_DIR"
+    local tmp paths
+    tmp="$(mktemp)"
+    paths="$(mktemp)"
+    post_update_watch_paths > "$paths"
+    sed -e "s#__LABEL__#$POST_UPDATE_LABEL#g" "$POST_UPDATE_TEMPLATE" \
+        | awk -v f="$paths" '/^__WATCH_PATHS__$/ { while ((getline l < f) > 0) print l; next } { print }' > "$tmp"
+    render_template "$tmp" "$POST_UPDATE_PLIST"
+    rm -f "$tmp" "$paths"
+    log_info "Plist written: $POST_UPDATE_PLIST"
+}
+
+link_post_update_command() {
+    [ "${DRY_RUN:-0}" = "1" ] && return 0
+    if [ -d "$LOCAL_BIN_DIR" ]; then
+        ln -sfn "$POST_UPDATE_SCRIPT" "$LOCAL_BIN_DIR/hermes-post-update"
+        log_info "Linked $LOCAL_BIN_DIR/hermes-post-update -> $POST_UPDATE_SCRIPT"
+    else
+        log_warn "$LOCAL_BIN_DIR does not exist; run $POST_UPDATE_SCRIPT directly for manual use"
+    fi
+}
+
+unlink_post_update_command() {
+    local link="$LOCAL_BIN_DIR/hermes-post-update"
+    if [ -L "$link" ] && [ "$(readlink "$link")" = "$POST_UPDATE_SCRIPT" ]; then
+        rm -f "$link"
+    fi
+}
+
+# Idempotent: reloads the watcher if it is already loaded. Never touches the
+# hub or spoke services.
+load_post_update() {
+    if [ "${DRY_RUN:-0}" = "1" ]; then
+        log_info "DRY RUN: $POST_UPDATE_LABEL plist generated; launchctl was not called"
+        return
+    fi
+    local user_id
+    user_id=$(id -u)
+    launchctl bootout "gui/$user_id/$POST_UPDATE_LABEL" 2>/dev/null || true
+    launchctl enable "gui/$user_id/$POST_UPDATE_LABEL" 2>/dev/null || true
+    if ! launchctl bootstrap "gui/$user_id" "$POST_UPDATE_PLIST"; then
+        log_error "launchctl failed to load $POST_UPDATE_LABEL"
+        exit 1
+    fi
+    log_info "$POST_UPDATE_LABEL loaded"
+}
+
+unload_post_update() {
+    if [ "${DRY_RUN:-0}" != "1" ]; then
+        local user_id
+        user_id=$(id -u)
+        [ -f "$POST_UPDATE_PLIST" ] && launchctl bootout "gui/$user_id" "$POST_UPDATE_PLIST" 2>/dev/null || true
+        launchctl bootout "gui/$user_id/$POST_UPDATE_LABEL" 2>/dev/null || true
+    fi
+    rm -f "$POST_UPDATE_PLIST"
+    unlink_post_update_command
 }
 
 install_services() {
@@ -179,6 +267,7 @@ install_services() {
             exit 1
         fi
         log_info "$SPOKE_LABEL loaded"
+        load_post_update
     fi
 }
 
@@ -200,6 +289,9 @@ uninstall_services() {
     else
         log_info "DRY RUN: launchctl was not called"
     fi
+    if has_spoke; then
+        unload_post_update
+    fi
 
     log_info "Services uninstalled"
 }
@@ -218,9 +310,9 @@ show_status() {
     echo ""
     local user_id
     user_id=$(id -u)
-    for label in "$HUB_LABEL" "$SPOKE_LABEL"; do
+    for label in "$HUB_LABEL" "$SPOKE_LABEL" "$POST_UPDATE_LABEL"; do
         [ "$label" = "$HUB_LABEL" ] && [ "$SERVICE_MODE" = spoke ] && continue
-        [ "$label" = "$SPOKE_LABEL" ] && [ "$SERVICE_MODE" = hub ] && continue
+        [ "$label" != "$HUB_LABEL" ] && [ "$SERVICE_MODE" = hub ] && continue
         if launchctl print "gui/$user_id/$label" >/dev/null 2>&1; then
             echo -e "${GREEN}OK${NC} $label is registered"
             launchctl print "gui/$user_id/$label" | grep -E "pid =|last exit code" || true
@@ -228,6 +320,11 @@ show_status() {
             echo -e "${RED}--${NC} $label is NOT registered"
         fi
     done
+    if has_spoke && [ -f "$LOG_DIR/$POST_UPDATE_LABEL.log" ]; then
+        echo ""
+        echo "Last $POST_UPDATE_LABEL activity:"
+        tail -n 3 "$LOG_DIR/$POST_UPDATE_LABEL.log" | sed 's/^/  /'
+    fi
     echo ""
     if [ "$SERVICE_MODE" = hub ] || [ "$SERVICE_MODE" = both ]; then
         if lsof -nP -iTCP:"$HUB_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
@@ -240,12 +337,15 @@ show_status() {
 }
 
 show_help() {
-    echo "Usage: $0 {install|uninstall|status|reinstall}"
+    echo "Usage: $0 {install|uninstall|status|reinstall|install-watcher|uninstall-watcher}"
     echo ""
-    echo "  install    - Generate plists and load the services selected by SERVICE_MODE"
-    echo "  uninstall  - Unload the services selected by SERVICE_MODE and remove their plists"
-    echo "  status     - Show registration, PID, and hub port status for the selected mode"
-    echo "  reinstall  - uninstall then install"
+    echo "  install           - Generate plists and load the services selected by SERVICE_MODE"
+    echo "                      (spoke/both also install the $POST_UPDATE_LABEL watcher)"
+    echo "  uninstall         - Unload the services selected by SERVICE_MODE and remove their plists"
+    echo "  status            - Show registration, PID, and hub port status for the selected mode"
+    echo "  reinstall         - uninstall then install"
+    echo "  install-watcher   - (Re)install only $POST_UPDATE_LABEL; never touches hub or spoke"
+    echo "  uninstall-watcher - Remove only $POST_UPDATE_LABEL"
     echo ""
     echo "SERVICE_MODE selects which labels are managed: hub, spoke, or both (default)."
     echo ""
@@ -255,8 +355,8 @@ show_help() {
     echo "See docs/DEPLOYMENT.md for hub-only, spoke-only, and combined setup guides."
     echo ""
     echo "Never touches ai.hermes.gateway. Env overrides: HOMES_DIR, LOG_DIR,"
-    echo "HUB_VENV, HERMES_AGENT_VENV, SERVICE_MODE, HUB_BIND_HOST, SPOKE_HUB_HOST,"
-    echo "HUB_PORT, HUB_PUBLIC_URL, HUB_TASK_TTL_SECONDS, SPOKE_NAME, LAUNCH_AGENTS_DIR."
+    echo "HUB_VENV, SERVICE_MODE, HUB_BIND_HOST, SPOKE_HUB_HOST, HUB_PORT,"
+    echo "HUB_PUBLIC_URL, HUB_TASK_TTL_SECONDS, SPOKE_NAME, LAUNCH_AGENTS_DIR, LOCAL_BIN_DIR."
 }
 
 case "${1:-status}" in
@@ -264,6 +364,7 @@ case "${1:-status}" in
         check_dependencies
         create_plists
         install_services
+        if has_spoke; then link_post_update_command; fi
         ;;
     uninstall)
         uninstall_services
@@ -277,6 +378,17 @@ case "${1:-status}" in
         check_dependencies
         create_plists
         install_services
+        if has_spoke; then link_post_update_command; fi
+        ;;
+    install-watcher)
+        [ -x "$POST_UPDATE_SCRIPT" ] || { log_error "Post-update script must be executable: $POST_UPDATE_SCRIPT"; exit 1; }
+        create_post_update_plist
+        load_post_update
+        link_post_update_command
+        ;;
+    uninstall-watcher)
+        unload_post_update
+        log_info "$POST_UPDATE_LABEL removed"
         ;;
     help|--help|-h)
         show_help

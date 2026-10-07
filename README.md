@@ -11,3 +11,12 @@ full design and decision record.
 Non-Hermes agents on the hub's Mac can call it too. See
 [`docs/CALLERS.md`](docs/CALLERS.md): give them the hub token's Keychain
 location and the agent card URL, and the card covers the rest.
+
+## Operations
+
+- Services (hub, spoke, post-update watcher): [`docs/SERVICES.md`](docs/SERVICES.md),
+  setup per host type in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+- **After `hermes update`:** the `ai.hermes.post-update` watcher restarts the
+  spoke onto Hermes's new dependency environment automatically. See
+  [`docs/POST-UPDATE.md`](docs/POST-UPDATE.md).
+- Past failures and their fixes: [`docs/INCIDENTS.md`](docs/INCIDENTS.md).

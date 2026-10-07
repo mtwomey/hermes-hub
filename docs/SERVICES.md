@@ -1,13 +1,15 @@
 # Hermes Hub managed services (V10)
 
-V10 M1–M3 installs two user LaunchAgents on Pumpkin:
+V10 M1–M3 installs two user LaunchAgents on Pumpkin, plus a third that keeps
+the spoke current across Hermes updates:
 
 | Label | Purpose | Runtime |
 |---|---|---|
-| `ai.hermes.hub` | Hub listener on `127.0.0.1:8770` | `/Users/mtwomey/Git_Repos/hermes-hub/.venv` |
-| `ai.hermes.spoke` | Pumpkin's outbound local Hermes spoke | existing `~/.hermes/hermes-agent/venv` — **no package is installed by this service** |
+| `ai.hermes.hub` | Hub listener on port 8770 | `/Users/mtwomey/Git_Repos/hermes-hub/.venv` |
+| `ai.hermes.spoke` | Pumpkin's outbound local Hermes spoke | Hermes's currently selected dependency generation, resolved at start (no pinned venv path) — **no package is installed by this service** |
+| `ai.hermes.post-update` | Restarts the spoke onto Hermes's new dependency generation after `hermes update`; installed with the spoke | `services/hermes-post-update.sh --watch` (bash + Hermes's own interpreter, stdlib only). See [`POST-UPDATE.md`](POST-UPDATE.md) |
 
-The installer is `services/install-hub-services.sh`. It owns only these two labels. It must never target `ai.hermes.gateway`. `SERVICE_MODE` (`hub`, `spoke`, or `both`) selects which of the two are managed by any given `install`/`uninstall`/`status`/`reinstall` invocation.
+The installer is `services/install-hub-services.sh`. It owns only these labels. It must never target `ai.hermes.gateway`. `SERVICE_MODE` (`hub`, `spoke`, or `both`) selects which are managed by any given `install`/`uninstall`/`status`/`reinstall` invocation; the watcher goes with the spoke. `install-watcher` / `uninstall-watcher` manage only the watcher and never touch the hub or spoke.
 
 For a complete hub-only, spoke-only, or combined-host setup, use
 [`DEPLOYMENT.md`](DEPLOYMENT.md).
@@ -67,7 +69,11 @@ cd ~/Git_Repos/hermes-hub
 services/install-hub-services.sh uninstall
 ```
 
-This bootouts/removes **only** `ai.hermes.hub` and `ai.hermes.spoke` and their plists. It does not edit or restart `ai.hermes.gateway`, and it does not alter `~/.hermes/hermes-agent/`.
+This bootouts/removes **only** `ai.hermes.hub`, `ai.hermes.spoke` and `ai.hermes.post-update` (and the `~/.local/bin/hermes-post-update` link) and their plists. It does not edit or restart `ai.hermes.gateway`, and it does not alter `~/.hermes/hermes-agent/`.
+
+## After a Hermes update
+
+Nothing to do for the spoke: `ai.hermes.post-update` moves it onto the new dependency generation within about 90 s, after any running peer task finishes. Restart the gateway/desktop app if its notification says they're still on an old environment. Details, logs and a rehearsal procedure (`hermes pm repair`): [`POST-UPDATE.md`](POST-UPDATE.md).
 
 To also remove the two V5a Keychain credentials after confirming no deployment uses them:
 

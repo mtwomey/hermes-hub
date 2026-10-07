@@ -71,3 +71,20 @@ PY
    Re-check the logs and direct LAN connection. If it does not remain up after this single attempt, boot it out, preserve the logs, and stop rather than leaving a crash loop on the managed laptop.
 
 A passing M4 result requires both spokes in `peer_list`, a direct Olive→Pumpkin `:8770` connection, and a successful authenticated remote task after both reboots—without anything hand-started.
+
+## After a Hermes update on Olive
+
+Olive runs the same `ai.hermes.post-update` watcher as Pumpkin (installed with
+`services/install-hub-services.sh install-watcher`, which never touches the
+spoke plist or its `HERMES_HUB_HOST`). After `hermes update` on Olive it moves
+Olive's spoke onto the new dependency generation by itself, after any running
+task finishes. It is local and outbound-only like the spoke: it opens no port
+and changes no firewall/Jamf/CyberArk setting. Logs:
+`~/.hermes/logs/ai.hermes.post-update.log`. Full description:
+[`POST-UPDATE.md`](POST-UPDATE.md).
+
+A peer can't restart its own spoke and report the result in the same
+`peer_ask` turn (see `INCIDENTS.md`). The watcher sidesteps this: when Olive's
+spoke is serving a task, the watcher waits for that task to finish, then
+restarts it. So rehearse with one `peer_ask` that runs `hermes pm repair` and
+ends, then a second `peer_ask` ≥ 2 min later that reads the log.

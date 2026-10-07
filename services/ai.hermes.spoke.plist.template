@@ -15,8 +15,6 @@
 
     <key>EnvironmentVariables</key>
     <dict>
-        <key>HERMES_AGENT_VENV</key>
-        <string>__HERMES_VENV__</string>
         <key>HERMES_HUB_REPO</key>
         <string>__REPO_DIR__</string>
         <key>HERMES_HUB_PORT</key>

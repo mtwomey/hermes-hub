@@ -21,7 +21,7 @@ not from a real restart.
 | Plugin source | `<repo>/plugin/hermes_hub_peer/` |
 | Hub port | 8770 |
 | Live gateway's hermes-peer listener | 8765 — leave alone |
-| Hermes venv | `~/.hermes/hermes-agent/venv` — **nothing gets installed into it** |
+| Hermes runtime | managed dependency generations under `~/.hermes/installs/` (the legacy `~/.hermes/hermes-agent/venv` no longer exists) — **nothing gets installed into it** |
 
 Sanity check that nothing is already there:
 
@@ -122,7 +122,7 @@ and a spoke, in another terminal:
 ```bash
 cd /Users/mtwomey/Git_Repos/hermes-hub
 HERMES_HUB_SPOKE_CREDENTIAL='<the spoke secret>' \
-  ~/.hermes/hermes-agent/venv/bin/python scripts/real_spoke.py 8770 Pumpkin
+  "$(awk '/^exec /{print $2; exit}' ~/.hermes/hermes-agent/.hermes/bin/hermes)" scripts/real_spoke.py 8770 Pumpkin
 ```
 
 **Pass:** `curl -s http://127.0.0.1:8770/health` returns

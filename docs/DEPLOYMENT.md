@@ -15,7 +15,7 @@ On each host:
    .venv/bin/pip install -e '.[dev]'
    ```
 
-2. Hermes must already be installed. A spoke uses Hermes's existing runtime venv at `~/.hermes/hermes-agent/venv`; the service checks that its required transport packages exist and fails loudly if they do not.
+2. Hermes must already be installed (package-managed layout: `~/.hermes/installs/<id>/facts.json` exists). A spoke runs on whichever dependency generation Hermes currently has selected; its wrapper resolves that at start and fails loudly if the transport packages are missing. Nothing is installed into Hermes's runtime. Spoke installs also get the `ai.hermes.post-update` watcher, which restarts the spoke onto the new generation after each Hermes update. See [`POST-UPDATE.md`](POST-UPDATE.md).
 
 3. Provision the required Keychain credentials out of band. Never put tokens or per-spoke credentials in the configuration file, plist, repository, shell history, or logs.
 
@@ -70,6 +70,7 @@ Install and verify:
 services/install-hub-services.sh install
 services/install-hub-services.sh status
 launchctl print gui/$(id -u)/ai.hermes.spoke
+launchctl print gui/$(id -u)/ai.hermes.post-update
 ```
 
 The hub operator must provision the matching spoke credential in the spoke host's Keychain before starting it.
@@ -106,6 +107,14 @@ services/install-hub-services.sh status
 
 # Remove selected services and their plists. Keychain credentials are retained.
 services/install-hub-services.sh uninstall
+
+# Add (or reload) only the post-update watcher on an existing spoke host;
+# never regenerates or restarts the hub or spoke. Remove it with uninstall-watcher.
+services/install-hub-services.sh install-watcher
 ```
 
 For a mode change, uninstall the old mode first, update `SERVICE_MODE`, then install the new mode. Inspect `~/.hermes/logs/ai.hermes.hub.error.log` or `~/.hermes/logs/ai.hermes.spoke.error.log` if launchd does not keep a service running.
+
+## After a Hermes update
+
+The spoke is moved onto Hermes's new dependency generation automatically by `ai.hermes.post-update` (manual equivalent: `hermes-post-update`). See [`POST-UPDATE.md`](POST-UPDATE.md).
