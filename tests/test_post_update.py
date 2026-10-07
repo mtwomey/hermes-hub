@@ -44,6 +44,11 @@ exit 0
 FAKE_LSOF = r"""#!/bin/bash
 # lsof -p PID  -> one line per generation the pid has open
 pid="$2"
+# Simulate Hermes switching facts.json while the watcher is mid-run.
+if [ -f "$FAKE_STATE/flip_to" ]; then
+  cat "$FAKE_STATE/flip_to" > "$FAKE_FACTS"
+  rm -f "$FAKE_STATE/flip_to"
+fi
 grep "^$pid " "$FAKE_STATE/envmap" 2>/dev/null | while read -r _ env; do
   echo "python $pid user txt REG 1,2 3 4 /h/.hermes/installs/x/environments/$env/venv/lib/python3.14/site.py"
 done
@@ -75,6 +80,17 @@ def selected_venv(project_root):
     "pm/runtime.py": """
 def collect_runtime_generations(root):
     return []
+""",
+    "pm/filesystem.py": """
+import fcntl
+
+def lock_fd(fd, *, wait, timeout=None):
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return True
+    except OSError:
+        return False
 """,
     "hermes_cli/runtime_state.py": """
 import os, shutil
@@ -156,12 +172,20 @@ def rig(tmp_path):
                     f.write(env_hash + "\n")
             return g
 
+        def flip_selection_mid_run(self, env_hash: str) -> None:
+            (state / "flip_to").write_text(json.dumps({"packages": {"venv": {
+                "environment": f"{inst}/environments/{env_hash}/venv"}}, "schema": 1}))
+
+        def install_lock_path(self) -> Path:
+            return inst / ".install.lock"
+
         def calls(self, name: str = "calls") -> str:
             f = state / name
             return f.read_text() if f.exists() else ""
 
-        def run(self, *args: str, timeout: int = 60) -> subprocess.CompletedProcess:
+        def run(self, *args: str, timeout: int = 60, env_extra: dict | None = None) -> subprocess.CompletedProcess:
             env = dict(os.environ)
+            env.update(env_extra or {})
             env.update({
                 "HERMES_HOME": str(home),
                 "HERMES_AGENT_ROOT": str(agent_root),
@@ -175,12 +199,14 @@ def rig(tmp_path):
                 "LAUNCHCTL": str(bins / "launchctl"),
                 "LSOF": str(bins / "lsof"),
                 "FAKE_STATE": str(state),
+                "FAKE_FACTS": str(inst / "facts.json"),
             })
             return subprocess.run(["bash", str(SCRIPT), *args], env=env, capture_output=True,
                                   text=True, timeout=timeout, check=False)
 
     r = Rig()
     r.tmp_path = tmp_path
+    r.inst = inst
     return r
 
 
@@ -411,3 +437,69 @@ def test_cleanup_failure_is_a_warning_not_a_failure(rig, monkeypatch):
     assert "cleanup of old generations failed" in res.stderr
     assert "simulated collector failure" in res.stderr
     assert old.exists()
+
+
+# --- waiting for Hermes to be idle, and re-checking the selection --------------
+
+
+def _hold_lock(path: Path):
+    import fcntl
+    path.touch()
+    f = open(path, "r+")
+    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    return f
+
+
+def test_waits_while_hermes_install_lock_is_held(rig):
+    rig.select(NEW)
+    rig.spoke(1000, NEW)
+    holder = _hold_lock(rig.install_lock_path())
+    try:
+        t0 = time.time()
+        res = rig.run(env_extra={"HERMES_POST_UPDATE_BUSY_MAX": "4"})
+        elapsed = time.time() - t0
+    finally:
+        holder.close()
+    assert res.returncode == 0, res.stderr
+    assert elapsed >= 3.5
+    assert "waiting for a Hermes dependency install to finish" in res.stdout
+    assert "still installing/changing after 4s" in res.stderr
+
+
+def test_proceeds_as_soon_as_install_lock_is_released(rig):
+    import threading
+    rig.select(NEW)
+    rig.spoke(1000, OLD)
+    holder = _hold_lock(rig.install_lock_path())
+    threading.Timer(3, holder.close).start()
+    t0 = time.time()
+    res = rig.run()
+    elapsed = time.time() - t0
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert 2.5 <= elapsed < 30
+    assert "kickstart" in rig.calls()
+    assert "still installing" not in res.stderr
+
+
+def test_watch_settle_also_waits_for_a_fresh_generation_dir(rig):
+    rig.select(NEW)              # facts.json is an hour old...
+    rig.spoke(1000, NEW)
+    rig.generation(NEW)          # ...but environments/ just changed (build started)
+    t0 = time.time()
+    res = rig.run("--watch", "--settle", "3")
+    assert res.returncode == 0, res.stderr
+    assert time.time() - t0 >= 2.5
+
+
+def test_selection_change_during_run_triggers_another_pass(rig):
+    third = "d" * 32
+    rig.select(NEW)
+    rig.spoke(1000, NEW, restart_env=third)
+    rig.flip_selection_mid_run(third)   # Hermes switches facts.json while we run
+    res = rig.run()
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert f"selected environment changed to {third} during this run; checking again" in res.stdout
+    assert "kickstart" in rig.calls()
+    assert f"spoke pid 1001 is on {third}" in res.stdout
+    # The second pass must not re-run `hermes --version` / `hermes update`.
+    assert rig.calls("hermes_calls").count("--version") == 1

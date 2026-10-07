@@ -55,8 +55,12 @@ the *next* update. Each update therefore left ~730 MB behind indefinitely.
    `facts.json` is written into), plus `StartInterval` 900 s as a safety net and
    once at login (`RunAtLoad`). Other Hermes housekeeping in that directory also
    fires it; those runs are cheap silent no-ops.
-2. **Settles.** Waits until `facts.json` has been unchanged for 60 s, so it never
-   acts in the middle of an update.
+2. **Waits until Hermes is idle.** A dependency build holds Hermes's install lock
+   (`installs/<id>/.install.lock`) from start until it switches `facts.json`;
+   the watcher probes it the same non-blocking way Hermes does
+   (`pm.filesystem.lock_fd`) and waits while it's held. It also waits until
+   `facts.json` and `environments/` (a new generation directory appears when a
+   build starts) have been unchanged for 60 s. Capped at 15 min.
 3. **Compares.** Reads the selected generation from `facts.json` and the
    generation the spoke process actually has open (`lsof`). If they match, it
    exits silently. That's what happens on almost every run.
@@ -83,6 +87,11 @@ the *next* update. Each update therefore left ~730 MB behind indefinitely.
    first run after its last user exits. Restarting the gateway or desktop app
    usually triggers that run within seconds, at most 15 min later. The small
    package-manager runtime generations (`pm-runtime/`) are collected the same way.
+8. **Re-checks.** Reads the selection once more. If it changed while the run was
+   working, it runs again (at most 3 passes). launchd doesn't re-fire
+   `WatchPaths` for a job that is already running, so without this a switch
+   landing mid-run would wait for the 15-minute timer. Olive hit exactly that
+   during the first cleanup rollout.
 
 Safety properties:
 
@@ -218,6 +227,7 @@ and plist).
 | "spoke pid N loaded 'X', expected Y" | The spoke resolved a different interpreter/generation. Check `HERMES_SPOKE_PYTHON` overrides in the spoke plist and `INCIDENTS.md` (2026-09-28). |
 | Watcher never fires | `WatchPaths` must name the directory that contains the live `facts.json`; re-run `install-watcher`. |
 | Old generation not deleted | Something still uses it: `hermes-post-update` names what it kept; `lsof \| grep environments/<hash>` shows who. Relaunch that process. |
+| "Hermes still installing/changing after 900s; continuing anyway" | A build or something else held the install lock for 15 min. The run proceeds; check `hermes pm status`. |
 | "cleanup of old generations failed" | Logged with the collector's last error line; nothing was deleted. `hermes pm gc` is the manual fallback. |
 
 ## Verified
@@ -244,3 +254,12 @@ and plist).
   `7eba115c…` was kept while the gateway still held it. `hermes gateway restart`
   at 17:56:13 freed it, and the watcher deleted it at 17:56:32 (727 MB) with no
   manual step.
+- **Race fix, Pumpkin, 2026-10-07.** On Olive, a watcher run was already in
+  progress when `facts.json` switched, so launchd dropped the change event and the
+  spoke stayed on the old generation until the timer. Measured on Pumpkin
+  that a build holds `.install.lock` from start (18:05:05) until the
+  `facts.json` switch (18:05:12). With the idle wait and the re-check:
+  `hermes pm repair` switched `facts.json` at 18:10:18. The watcher moved the spoke at
+  18:11:19 and deleted the freed previous generation at 18:11:37 (727 MB).
+  After `hermes gateway restart` at 18:12:05 it deleted the gateway's old
+  generation at 18:12:57 (727 MB).

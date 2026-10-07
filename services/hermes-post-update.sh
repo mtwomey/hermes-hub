@@ -19,7 +19,10 @@
 #   2. (manual mode only) run `hermes --version` so hermes_bootstrap finishes any
 #      pending dependency build. --watch never runs hermes, so it can never
 #      itself trigger a rebuild.
-#   3. (--watch) wait until facts.json has been unchanged for --settle seconds.
+#   3. Wait until Hermes is idle: its install lock (installs/<id>/.install.lock,
+#      held for a whole dependency build until facts.json switches) is free,
+#      and (--watch) facts.json and environments/ have been unchanged for
+#      --settle seconds. Capped at 15 min.
 #   4. Compare the spoke's loaded generation to the selected one; stop if equal.
 #   5. Wait for the spoke's in-flight tasks to finish (spoke ledger rows in
 #      state 'working' that are younger than the hub task TTL), unless --no-wait.
@@ -33,6 +36,9 @@
 #      last user (e.g. the desktop app) restarting, instead of lingering until
 #      the next `hermes update`. Hermes's own 24 h minimum age is not applied
 #      (HERMES_POST_UPDATE_GC_MIN_AGE, default 0 s); leases are the real guard.
+#   9. Re-read the selection; if it changed while this run was working (launchd
+#      does not re-fire WatchPaths for a job that is already running), run again
+#      (at most 3 passes).
 #
 # Usage: hermes-post-update [--update] [--watch] [--force] [--no-wait] [--no-gc]
 #                           [--wait SECONDS] [--settle SECONDS]
@@ -42,9 +48,12 @@
 #   --no-wait  restart immediately even if spoke tasks are in flight
 #   --no-gc    skip step 8 (leave old generations for `hermes pm gc`)
 #   --wait N   max seconds to wait for in-flight tasks (default 600; 300 in --watch)
-#   --settle N seconds facts.json must be unchanged first (default 0; 60 in --watch)
+#   --settle N seconds facts.json/environments must be unchanged first
+#              (default 0; 60 in --watch)
 # Exit: 0 ok / nothing to do, 1 failure, 2 in-flight tasks did not finish in time.
 set -euo pipefail
+ORIG_ARGS=("$@")
+PASS="${HERMES_POST_UPDATE_PASS:-1}"
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_AGENT_ROOT="${HERMES_AGENT_ROOT:-$HERMES_HOME/hermes-agent}"
@@ -58,6 +67,7 @@ LAUNCHCTL="${LAUNCHCTL:-launchctl}"
 LSOF="${LSOF:-lsof}"
 VERIFY_SECS="${HERMES_POST_UPDATE_VERIFY_SECS:-90}"
 GC_MIN_AGE="${HERMES_POST_UPDATE_GC_MIN_AGE:-0}"
+BUSY_MAX="${HERMES_POST_UPDATE_BUSY_MAX:-900}"
 
 WATCH=0; FORCE=0; NO_WAIT=0; NO_GC=0; DO_UPDATE=0; WAIT_SECS=""; SETTLE_SECS=""
 while [ $# -gt 0 ]; do
@@ -120,12 +130,42 @@ for f in sorted(glob.glob(os.path.join(sys.argv[1], "installs", "*", "facts.json
 ' "$HERMES_HOME"
 }
 
-facts_age() {  # seconds since the newest facts.json changed
+quiet_age() {  # seconds since facts.json or environments/ (new/removed generation) last changed
     "$PY" -I -c '
 import glob, os, sys, time
-ms = [os.stat(f).st_mtime for f in glob.glob(os.path.join(sys.argv[1], "installs", "*", "facts.json"))]
+paths = []
+for d in glob.glob(os.path.join(sys.argv[1], "installs", "*")):
+    paths += [os.path.join(d, "facts.json"), os.path.join(d, "environments")]
+ms = [os.stat(p).st_mtime for p in paths if os.path.exists(p)]
 print(int(time.time() - max(ms)) if ms else 999999)
 ' "$HERMES_HOME"
+}
+
+install_busy() {  # 1 while a Hermes dependency install/build holds its install lock
+    # Same non-blocking probe Hermes uses (pm/install_states.py::_held). Any error
+    # counts as idle so a broken probe can never wedge the watcher.
+    "$PY" -I -c '
+import glob, os, sys
+sys.path.insert(0, sys.argv[2])
+try:
+    from pm.filesystem import lock_fd
+except Exception:
+    print(0); sys.exit()
+busy = 0
+for lock in glob.glob(os.path.join(sys.argv[1], "installs", "*", ".install.lock")):
+    try:
+        fd = os.open(lock, os.O_RDWR)
+    except OSError:
+        continue
+    try:
+        if not lock_fd(fd, wait=False):
+            busy = 1
+    except Exception:
+        pass
+    finally:
+        os.close(fd)
+print(busy)
+' "$HERMES_HOME" "$HERMES_AGENT_ROOT" 2>/dev/null || echo 0
 }
 
 envs_of_pid() {  # generation hashes a process has open, space separated
@@ -218,25 +258,32 @@ for g in collect_runtime_generations(state / "pm-runtime"):
 }
 
 # ---- 1-2. update / finalize (manual mode only) -----------------------------
-if [ "$DO_UPDATE" = 1 ]; then
+if [ "$DO_UPDATE" = 1 ] && [ "$PASS" = 1 ]; then
     say "running hermes update..."
     "$HERMES_BIN" update || die "hermes update failed; spoke left untouched"
 fi
-if [ "$WATCH" = 0 ]; then
+if [ "$WATCH" = 0 ] && [ "$PASS" = 1 ]; then
     say "finalizing Hermes dependencies (hermes --version)..."
     "$HERMES_BIN" --version >/dev/null 2>&1 || die "hermes --version failed; fix Hermes before restarting the spoke"
 fi
 
 [ -n "$(facts_files)" ] || die "no $HERMES_HOME/installs/*/facts.json found; is this a package-managed Hermes install?"
 
-# ---- 3. settle -------------------------------------------------------------
-if [ "$SETTLE_SECS" -gt 0 ]; then
-    for _ in $(seq 1 60); do
-        age="$(facts_age)"
-        [ "$age" -ge "$SETTLE_SECS" ] && break
-        sleep $(( SETTLE_SECS - age + 1 ))
-    done
-fi
+# ---- 3. wait until Hermes is idle ---------------------------------------------
+waited=0
+while :; do
+    busy="$(install_busy)"
+    age="$(quiet_age)"
+    if [ "$busy" != 1 ] && [ "$age" -ge "$SETTLE_SECS" ]; then break; fi
+    if [ "$waited" -ge "$BUSY_MAX" ]; then
+        warn "Hermes still installing/changing after ${BUSY_MAX}s; continuing anyway"
+        break
+    fi
+    if [ "$waited" = 0 ] && [ "$busy" = 1 ] && [ "$WATCH" = 0 ]; then
+        say "waiting for a Hermes dependency install to finish..."
+    fi
+    sleep 2; waited=$((waited + 2))
+done
 
 SEL="$(selected_env)"
 [ -n "$SEL" ] || die "could not read the selected environment from $HERMES_HOME/installs/*/facts.json"
@@ -320,3 +367,14 @@ fi  # RESTART
 
 # ---- 8. clean up old generations nothing uses any more ----------------------
 collect_old_generations
+
+# ---- 9. did the selection change while we were working? --------------------
+NOW_SEL="$(selected_env)"
+if [ -n "$NOW_SEL" ] && [ "$NOW_SEL" != "$SEL" ]; then
+    if [ "$PASS" -lt 3 ]; then
+        say "selected environment changed to $NOW_SEL during this run; checking again"
+        rm -rf "$LOCK_DIR"; trap - EXIT
+        HERMES_POST_UPDATE_PASS=$((PASS + 1)) exec "${BASH:-bash}" "$0" ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}
+    fi
+    warn "selected environment keeps changing ($NOW_SEL); leaving it to the next run"
+fi
