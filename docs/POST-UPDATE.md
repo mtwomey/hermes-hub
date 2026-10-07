@@ -193,3 +193,11 @@ and plist).
   succeeded. Through 17:32 launchd ran the watcher 8 times (load, the
   generation change, further changes in the watched directory, and the 17:31
   timer run); every run after the restart was a silent no-op with exit 0.
+- **Olive, 2026-10-07.** `git pull` to `0e5f09b`, `tests/test_post_update.py` +
+  `tests/test_service_definitions.py` passed on Olive (36), `install-watcher`
+  left the spoke PID unchanged, manual `hermes-post-update` correctly did
+  nothing. Rehearsal: `hermes pm repair` run *inside* a hub task selected a new
+  generation at 17:36:34; the spoke ledger showed that task as `working`, the
+  watcher waited for it to finish, restarted the spoke at 17:37:36, verified it
+  on the new generation and re-registered at 17:37:39. The next routed task was
+  served by the new spoke process.
