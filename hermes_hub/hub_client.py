@@ -32,6 +32,8 @@ import base64
 import uuid
 import hashlib
 import json as jsonlib
+import os
+import socket
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -52,6 +54,26 @@ DEFAULT_POLL_SECONDS = 1.0
 
 #: How long ``ask`` waits client-side before returning ``state=working`` (D2).
 DEFAULT_WAIT_SECONDS = 270.0
+
+
+#: BEA-310: overrides the ``callerName`` this client stamps on every message.
+ENV_CALLER_NAME = "HERMES_HUB_CALLER_NAME"
+
+
+def default_caller_name() -> str:
+    """Label for ``message.metadata.callerName`` (BEA-310).
+
+    Without it every spoke ledger row read ``caller=default`` and a real-world
+    duplicate could not be traced to its sender. Env override first, else
+    the short hostname; '' when neither is available (spoke then uses
+    ``default``)."""
+    explicit = os.environ.get(ENV_CALLER_NAME, "").strip()
+    if explicit:
+        return explicit[:64]
+    try:
+        return socket.gethostname().split(".")[0].strip()[:64]
+    except Exception:  # noqa: BLE001 - labelling is best-effort
+        return ""
 
 
 class HubClientError(RuntimeError):
@@ -123,6 +145,9 @@ class HubClient:
         message_id: str = "",
     ) -> Dict[str, Any]:
         metadata: Dict[str, Any] = {META_TARGET_SPOKE: spoke_name}
+        caller_name = default_caller_name()
+        if caller_name:
+            metadata["callerName"] = caller_name
         if credential:
             metadata[META_SPOKE_CREDENTIAL] = credential
         parts: List[Dict[str, Any]] = [{"text": text}]

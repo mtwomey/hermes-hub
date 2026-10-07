@@ -62,13 +62,20 @@ class RequestLedger:
             )
             """
         )
+        # BEA-310: full answer length, so an excerpt is never mistaken for the
+        # whole result (older ledgers are migrated in place).
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(requests)")}
+        if "answer_len" not in cols:
+            self._conn.execute("ALTER TABLE requests ADD COLUMN answer_len INTEGER NOT NULL DEFAULT 0")
         self._conn.commit()
 
     def record_start(self, *, task_id: str, context_id: str, caller: str, request: str) -> None:
         now = self._clock()
         with self._lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO requests VALUES (?, ?, ?, ?, 'working', '', ?, ?)",
+                "INSERT OR REPLACE INTO requests "
+                "(task_id, context_id, caller, request, state, answer, started_at, updated_at, answer_len) "
+                "VALUES (?, ?, ?, ?, 'working', '', ?, ?, 0)",
                 (task_id, context_id, caller, request[:REQUEST_CHARS], now, now),
             )
             self._conn.commit()
@@ -76,8 +83,9 @@ class RequestLedger:
     def record_end(self, *, task_id: str, state: str, answer: str = "") -> None:
         with self._lock:
             self._conn.execute(
-                "UPDATE requests SET state = ?, answer = ?, updated_at = ? WHERE task_id = ?",
-                (state, answer[:ANSWER_CHARS], self._clock(), task_id),
+                "UPDATE requests SET state = ?, answer = ?, answer_len = ?, updated_at = ? "
+                "WHERE task_id = ?",
+                (state, answer[:ANSWER_CHARS], len(answer), self._clock(), task_id),
             )
             self._conn.commit()
 
@@ -92,7 +100,7 @@ class RequestLedger:
         now = self._clock()
         with self._lock:
             rows = self._conn.execute(
-                "SELECT task_id, context_id, request, state, answer, started_at FROM requests "
+                "SELECT task_id, context_id, request, state, answer, started_at, answer_len FROM requests "
                 "WHERE caller = ? AND started_at >= ? AND task_id != ? "
                 "ORDER BY started_at DESC LIMIT ?",
                 (caller, now - within_s, exclude_task_id, limit),
@@ -105,6 +113,7 @@ class RequestLedger:
                 "state": r[3],
                 "answer": r[4],
                 "age_s": int(now - r[5]),
+                "answer_len": int(r[6] or 0),
             }
             for r in rows
         ]
@@ -134,12 +143,25 @@ def format_recent_requests(entries: List[Dict[str, Any]]) -> str:
         if e.get("state") in ("working", "submitted"):
             outcome = f"still running (task {e['task_id']})"
         else:
-            answer = " ".join(str(e.get("answer") or "").split())
+            raw = str(e.get("answer") or "")
+            answer = " ".join(raw.split())
+            total = int(e.get("answer_len") or 0)
+            if total > len(raw):
+                # BEA-310: mark excerpts so the agent never reports the rest
+                # of an earlier answer as lost.
+                answer += f" [EXCERPT: first {len(raw)} of {total} chars]"
             outcome = f"{e.get('state')} (task {e['task_id']}): {answer}"
         lines.append(f"- {_age(int(e.get('age_s') or 0))}: \"{request}\" -> {outcome}")
     lines.append(
         "If this request duplicates one of these, say so and return/refer to the "
         "earlier result instead of redoing the work, unless the caller explicitly "
         "asks to redo it."
+    )
+    lines.append(
+        "These answers are excerpts kept by this spoke. The hub still holds the "
+        "complete result of every earlier task: when the caller wants an earlier "
+        "result, give the task id and tell them to fetch it from the hub "
+        "(A2A GetTask, or peer_status/peer_wait with that task id). Never say the "
+        "rest of an earlier answer was lost or not saved."
     )
     return "\n".join(lines)
