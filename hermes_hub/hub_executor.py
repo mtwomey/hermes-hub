@@ -95,8 +95,11 @@ class HubExecutor(AgentExecutor):
         ttl_seconds: float = 1800.0,
         timeout_seconds: float | None = None,
         now: Callable[[], datetime] | None = None,
+        message_index: Any = None,
     ) -> None:
         self.router = router
+        #: Phase 2.1: ``MessageIdIndex`` shared with ``DedupRequestHandler``.
+        self.message_index = message_index
         self._now = now or (lambda: datetime.now(timezone.utc))
         # ``timeout_seconds`` is the deprecated pre-Phase-1 name.
         self.ttl_seconds = float(timeout_seconds if timeout_seconds is not None else ttl_seconds)
@@ -109,6 +112,10 @@ class HubExecutor(AgentExecutor):
         return self._now().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        if self.message_index is not None:
+            message_id = str(getattr(getattr(context, "message", None), "message_id", "") or "")
+            if message_id:
+                self.message_index.bind(message_id, context.task_id)
         updater = await open_task(context, event_queue)
         await updater.start_work()
         # Phase 1.3: liveness metadata, merged into task.metadata by the SDK's
