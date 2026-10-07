@@ -37,17 +37,22 @@ def _dry_run_env(tmp_path: Path) -> dict:
     fake_home = tmp_path / "home"
     launch_agents = tmp_path / "LaunchAgents"
     hub_venv = tmp_path / "hub-venv"
-    hermes_venv = tmp_path / "hermes-agent-venv"
     (hub_venv / "bin").mkdir(parents=True)
     (hub_venv / "bin" / "python").write_text("#!/bin/sh\n")
     fake_home.mkdir(parents=True)
     launch_agents.mkdir(parents=True)
+    # A package-managed Hermes install-state dir, as the post-update watcher expects.
+    install_state = fake_home / "installs" / "0123456789abcdef"
+    install_state.mkdir(parents=True)
+    (install_state / "facts.json").write_text("{}")
+    local_bin = tmp_path / "local-bin"
+    local_bin.mkdir()
     return {
         "HOMES_DIR": str(fake_home),
         "LOG_DIR": str(fake_home / "logs"),
         "HUB_VENV": str(hub_venv),
-        "HERMES_AGENT_VENV": str(hermes_venv),
         "LAUNCH_AGENTS_DIR": str(launch_agents),
+        "LOCAL_BIN_DIR": str(local_bin),
         # Isolate fixture execution from any real deployment configuration.
         "HUB_CONFIG_FILE": str(tmp_path / "missing-hub-service.env"),
         "HUB_HOST": "127.0.0.1",
@@ -74,6 +79,9 @@ def test_installer_and_templates_exist():
     assert (SERVICES_DIR / "ai.hermes.spoke.plist.template").exists()
     assert (SERVICES_DIR / "hermes-hub-wrapper.sh").exists()
     assert (SERVICES_DIR / "hermes-spoke-wrapper.sh").exists()
+    assert (SERVICES_DIR / "ai.hermes.post-update.plist.template").exists()
+    post_update = SERVICES_DIR / "hermes-post-update.sh"
+    assert post_update.exists() and os.access(post_update, os.X_OK)
 
 
 def test_dry_run_install_generates_valid_plists(tmp_path):
@@ -109,7 +117,8 @@ def test_dry_run_install_generates_valid_plists(tmp_path):
     spoke_data = plistlib.loads(spoke_plist.read_bytes())
     assert spoke_data["Label"] == "ai.hermes.spoke"
     assert spoke_data["EnvironmentVariables"]["HERMES_HUB_SPOKE_NAME"] == "Pumpkin"
-    assert spoke_data["EnvironmentVariables"]["HERMES_AGENT_VENV"] == env["HERMES_AGENT_VENV"]
+    # The legacy single venv is gone; the wrapper resolves Hermes's runtime itself.
+    assert "HERMES_AGENT_VENV" not in spoke_data["EnvironmentVariables"]
     # No credential-shaped key anywhere in the spoke plist.
     blob = spoke_plist.read_text()
     assert "CREDENTIAL" not in blob.upper() or "SPOKE_CREDENTIAL" not in blob.upper()
@@ -287,6 +296,7 @@ def test_uninstall_removes_exactly_what_install_created(tmp_path):
 
     assert not hub_plist.exists()
     assert not spoke_plist.exists()
+    assert not (launch_agents / "ai.hermes.post-update.plist").exists()
     # Nothing else appeared in the directory.
     assert list(launch_agents.iterdir()) == []
 
@@ -345,3 +355,86 @@ def test_hub_wrapper_fails_loudly_when_venv_missing(tmp_path):
     )
     assert result.returncode != 0
     assert "not found" in result.stderr or "not executable" in result.stderr
+
+
+# --- ai.hermes.post-update watcher (docs/POST-UPDATE.md) ---------------------
+
+
+def _post_update_plist(env: dict) -> dict:
+    path = Path(env["LAUNCH_AGENTS_DIR"]) / "ai.hermes.post-update.plist"
+    assert path.exists()
+    lint = subprocess.run(["plutil", "-lint", str(path)], capture_output=True, text=True)
+    assert lint.returncode == 0, lint.stdout + lint.stderr
+    return plistlib.loads(path.read_bytes())
+
+
+def test_install_with_spoke_generates_post_update_watcher(tmp_path):
+    _install_stub_launchctl(tmp_path)
+    env = _dry_run_env(tmp_path)
+    env["DRY_RUN"] = "1"
+    result = _run_installer("install", env_overrides=env)
+    assert result.returncode == 0, result.stderr
+
+    data = _post_update_plist(env)
+    assert data["Label"] == "ai.hermes.post-update"
+    assert data["ProgramArguments"] == [str(SERVICES_DIR / "hermes-post-update.sh"), "--watch"]
+    # Fires when the install-state dir holding facts.json changes...
+    assert data["WatchPaths"] == [str(Path(env["HOMES_DIR"]) / "installs" / "0123456789abcdef")]
+    # ...plus a periodic safety net; it is a one-shot job, never KeepAlive.
+    assert data["StartInterval"] == 900
+    assert data["RunAtLoad"] is True
+    assert data["KeepAlive"] is False
+    assert data["EnvironmentVariables"]["HERMES_HOME"] == env["HOMES_DIR"]
+    assert data["StandardOutPath"] == str(Path(env["LOG_DIR"]) / "ai.hermes.post-update.log")
+    blob = (Path(env["LAUNCH_AGENTS_DIR"]) / "ai.hermes.post-update.plist").read_text()
+    assert "__" not in blob.replace("<!--", "").replace("-->", "")
+    assert "CREDENTIAL" not in blob.upper()
+
+
+def test_post_update_watch_falls_back_to_installs_root(tmp_path):
+    _install_stub_launchctl(tmp_path)
+    env = _dry_run_env(tmp_path)
+    env["DRY_RUN"] = "1"
+    for f in (Path(env["HOMES_DIR"]) / "installs").glob("*/facts.json"):
+        f.unlink()
+    result = _run_installer("install", env_overrides=env)
+    assert result.returncode == 0, result.stderr
+    assert _post_update_plist(env)["WatchPaths"] == [str(Path(env["HOMES_DIR"]) / "installs")]
+
+
+def test_hub_mode_never_installs_post_update_watcher(tmp_path):
+    _install_stub_launchctl(tmp_path)
+    env = _dry_run_env(tmp_path)
+    env["SERVICE_MODE"] = "hub"
+    result = _run_installer("install", env_overrides=env)
+    assert result.returncode == 0, result.stderr
+    assert not (Path(env["LAUNCH_AGENTS_DIR"]) / "ai.hermes.post-update.plist").exists()
+    assert not (Path(env["LOCAL_BIN_DIR"]) / "hermes-post-update").exists()
+
+
+def test_install_links_manual_command_and_uninstall_removes_it(tmp_path):
+    _install_stub_launchctl(tmp_path)
+    env = _dry_run_env(tmp_path)
+    assert _run_installer("install", env_overrides=env).returncode == 0
+    link = Path(env["LOCAL_BIN_DIR"]) / "hermes-post-update"
+    assert link.is_symlink()
+    assert os.readlink(link) == str(SERVICES_DIR / "hermes-post-update.sh")
+    assert _run_installer("uninstall", env_overrides=env).returncode == 0
+    assert not link.exists() and not link.is_symlink()
+
+
+def test_install_watcher_touches_only_the_watcher(tmp_path):
+    _install_stub_launchctl(tmp_path)
+    env = _dry_run_env(tmp_path)
+    launch_agents = Path(env["LAUNCH_AGENTS_DIR"])
+    result = _run_installer("install-watcher", env_overrides=env)
+    assert result.returncode == 0, result.stderr
+    assert sorted(p.name for p in launch_agents.iterdir()) == ["ai.hermes.post-update.plist"]
+    # launchctl was only ever pointed at the watcher label.
+    calls = [l for l in result.stderr.splitlines() if l.startswith("stub-launchctl")]
+    assert calls and all("ai.hermes.hub" not in c and "ai.hermes.spoke" not in c for c in calls)
+    assert any("bootstrap" in c and "ai.hermes.post-update.plist" in c for c in calls)
+
+    result = _run_installer("uninstall-watcher", env_overrides=env)
+    assert result.returncode == 0, result.stderr
+    assert list(launch_agents.iterdir()) == []
