@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 #: hermesError code for a task whose spoke WebSocket dropped mid-task.
 SPOKE_DISCONNECTED = "spoke_disconnected"
+TTL_EXPIRED = "ttl_expired"
 
 from .protocol import (
     FRAME_ARTIFACT_BEGIN,
@@ -28,6 +29,7 @@ from .protocol import (
     build_artifact_chunk_frame,
     build_artifact_end_frame,
     build_task_artifact_frame,
+    build_task_cancel_frame,
     build_task_failed_frame,
     build_task_frame,
     chunk_artifact_bytes,
@@ -121,6 +123,23 @@ class Router:
             frame.get("type"),
         )
 
+    async def cancel_task(self, task_id: str, reason: str = "cancelled") -> bool:
+        """Phase 3.3: tell the spoke running ``task_id`` to stop.
+
+        Best-effort: returns False when the task has no live route or its
+        spoke is not connected (the caller still ends the task CANCELED)."""
+        spoke_name = self._task_spokes.get(task_id)
+        connection = self._connections.get(spoke_name) if spoke_name else None
+        if connection is None:
+            return False
+        try:
+            await connection.send(build_task_cancel_frame(task_id=task_id, reason=reason))
+        except Exception:  # noqa: BLE001 - spoke link gone; cancel still applies hub-side
+            logger.warning("task_cancel for task_id=%s could not be sent to %s", task_id, spoke_name)
+            return False
+        logger.info("sent task_cancel task_id=%s spoke=%s reason=%s", task_id, spoke_name, reason)
+        return True
+
     async def route_task(
         self,
         *,
@@ -183,10 +202,13 @@ class Router:
             while True:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
+                    await self.cancel_task(task_id, reason=TTL_EXPIRED)
                     raise TaskTTLExpired(ttl_message)
                 try:
                     frame = await asyncio.wait_for(queue.get(), timeout=remaining)
                 except asyncio.TimeoutError:
+                    # Phase 3.3: auto-stop -- the spoke is told to interrupt.
+                    await self.cancel_task(task_id, reason=TTL_EXPIRED)
                     raise TaskTTLExpired(ttl_message) from None
                 frame_type = frame.get("type")
 
