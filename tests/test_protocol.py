@@ -165,3 +165,42 @@ def test_is_terminal_frame():
     assert is_terminal_frame({"type": "task_failed"}) is True
     assert is_terminal_frame({"type": "task_status"}) is False
     assert is_terminal_frame({"type": "register"}) is False
+
+
+# --- Phase 3.1: cancel frames (BEA-306) -------------------------------------
+
+def test_task_cancel_frame_is_hub_to_spoke_and_not_terminal():
+    from hermes_hub.protocol import (
+        FRAME_TASK_CANCEL, build_task_cancel_frame, is_terminal_frame,
+    )
+    frame = build_task_cancel_frame(task_id="t-1", reason="ttl_expired")
+    assert frame == {"type": FRAME_TASK_CANCEL, "task_id": "t-1", "reason": "ttl_expired"}
+    assert FRAME_TASK_CANCEL == "task_cancel"
+    assert not is_terminal_frame(frame)
+
+
+def test_task_cancelled_frame_is_terminal():
+    from hermes_hub.protocol import (
+        FRAME_TASK_CANCELLED, build_task_cancelled_frame, is_terminal_frame,
+    )
+    frame = build_task_cancelled_frame(task_id="t-1", reason="cancelled")
+    assert frame == {"type": FRAME_TASK_CANCELLED, "task_id": "t-1", "reason": "cancelled"}
+    assert is_terminal_frame(frame)
+
+
+def test_parse_task_cancel_frame_validates():
+    import pytest
+    from hermes_hub.protocol import parse_task_cancel_frame
+    assert parse_task_cancel_frame({"type": "task_cancel", "task_id": "t-9"}) == ("t-9", "cancelled")
+    assert parse_task_cancel_frame(
+        {"type": "task_cancel", "task_id": "t-9", "reason": "ttl_expired"}
+    ) == ("t-9", "ttl_expired")
+    for bad in (
+        {"type": "task", "task_id": "t-9"},
+        {"type": "task_cancel"},
+        {"type": "task_cancel", "task_id": ""},
+        {"type": "task_cancel", "task_id": 5},
+        {"type": "task_cancel", "task_id": "t", "reason": 3},
+    ):
+        with pytest.raises(ValueError):
+            parse_task_cancel_frame(bad)
