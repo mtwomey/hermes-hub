@@ -263,3 +263,10 @@ and plist).
   18:11:19 and deleted the freed previous generation at 18:11:37 (727 MB).
   After `hermes gateway restart` at 18:12:05 it deleted the gateway's old
   generation at 18:12:57 (727 MB).
+- **Cleanup + race fix, Olive, 2026-10-07.** Pulled `cf67125`, 47 tests passed
+  on Olive. The watcher found the spoke on the old generation at 18:14:18, waited
+  for the in-flight hub task, restarted the spoke at 18:16:12 and verified it
+  on the selected generation and re-registered at 18:16:15. After
+  `hermes gateway restart` at 18:19:00 it deleted the freed generation at
+  18:19:22 (596 MB). Remaining: the selected generation, plus one still held
+  by Olive's desktop app until it's relaunched.
