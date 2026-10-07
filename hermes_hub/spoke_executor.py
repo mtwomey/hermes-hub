@@ -98,6 +98,11 @@ def build_spoke_prompt(
     lines += [
         "",
         "Answer directly and concisely in plain text.",
+        "If the caller asks you not to take action or not to modify anything, "
+        "this turn is strictly read-only: do not edit or patch files, skills, "
+        "memory or configuration, and do not install or update packages, even "
+        "to fix a problem you find. Report the problem and what you would "
+        "change instead. Throwaway scratch files are allowed.",
         "This conversation may continue over several turns; remember what "
         "you are told and refer back to it when asked.",
     ]
@@ -207,15 +212,29 @@ def interrupt_hermes_agent(agent: Any) -> None:
             return
 
 
+_SESSION_DB: Any = None
+_SESSION_DB_LOCK = threading.Lock()
+
+
 def _open_session_db():
     """The shared SQLite session store, or None if unavailable (best-effort,
-    same fallback hermes-peer uses)."""
-    try:
-        from hermes_state import SessionDB
+    same fallback hermes-peer uses).
 
-        return SessionDB()
-    except Exception:
-        return None
+    BEA-310: one process-wide ``SessionDB`` (it is internally locked and
+    thread-safe). Opening a new one per task leaked a writer connection per
+    hub turn ("N live SessionDB handles on state.db").
+    """
+    global _SESSION_DB
+    with _SESSION_DB_LOCK:
+        if _SESSION_DB is not None:
+            return _SESSION_DB
+        try:
+            from hermes_state import SessionDB
+
+            _SESSION_DB = SessionDB()
+        except Exception:
+            return None
+        return _SESSION_DB
 
 
 class SpokeExecutor:
